@@ -82,7 +82,7 @@ def Q(pfmap):
 
 def block_cg(A, b, regul=1e-8, x0=None, rtol=1e-5, atol=0, max_iter=None, M=None):
     # https://arxiv.org/pdf/2502.16998 Algorithm 6
-    tol = max(rtol * torch.sum(b.to_torch() ** 2, dim=-1).mean(), atol)
+    tol = max(rtol * (torch.sum(b.to_torch() ** 2, dim=-1) ** 0.5).mean(), atol)
     lc = A.layer_collection
     if max_iter is None:
         max_iter = 10 * lc.numel()
@@ -100,7 +100,7 @@ def block_cg(A, b, regul=1e-8, x0=None, rtol=1e-5, atol=0, max_iter=None, M=None
     p = z
     p = Q(p)
     for i in range(max_iter):
-        if torch.all(torch.sum(r.to_torch() ** 2, dim=-1) <= tol):
+        if torch.all(torch.sum(r.to_torch() ** 2, dim=-1) ** 0.5 <= tol):
             return x
         Ap = A @ p
         if regul > 0:

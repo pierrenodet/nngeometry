@@ -17,13 +17,7 @@ def hvp(func, primals, tangents):
 
 
 def batched_hvp(func, primals, batched_tangents):
-    return torch.vmap(
-        lambda tangents: torch.func.jvp(
-            lambda p: torch.func.grad(func)(p),
-            primals=(primals,),
-            tangents=(tangents,),
-        )[1]
-    )(batched_tangents)
+    return torch.vmap(lambda tangents: hvp(func, primals, tangents))(batched_tangents)
 
 
 class TorchFuncHessianBackend(AbstractBackend):
