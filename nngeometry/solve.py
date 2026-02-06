@@ -71,17 +71,16 @@ def solve_fmat(f1, f2, regul=0):
 
 
 def Q(pfmap):
+    Q, _ = torch.linalg.qr(pfmap.to_torch().view(-1, pfmap.layer_collection.numel()).T)
     return PFMapDense(
         pfmap.layer_collection,
         generator=pfmap.generator,
-        data=torch.linalg.qr(
-            pfmap.to_torch().view(-1, pfmap.layer_collection.numel()).T
-        )[0].T.view(*pfmap.size()),
+        data=Q.T.view(*pfmap.size()),
     )
 
 
 def block_cg(A, b, regul=1e-8, x0=None, rtol=1e-5, atol=0, max_iter=None, M=None):
-    # https://arxiv.org/pdf/2502.16998 Algorithm 6
+    # https://arxiv.org/pdf/2502.16998 Algorithm 8 with γ->α and δ->β to match cg
     tol = max(rtol * (torch.sum(b.to_torch() ** 2, dim=-1) ** 0.5).mean(), atol)
     lc = A.layer_collection
     if max_iter is None:
