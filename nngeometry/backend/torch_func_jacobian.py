@@ -23,9 +23,9 @@ def batched_fvp(func, primals, batched_tangents):
 
 
 class TorchFuncJacobianBackend(AbstractBackend):
-    def __init__(self, model, sqrt_var, verbose=False, compiled=False):
+    def __init__(self, model, function, verbose=False, compiled=False):
         self.model = model
-        self.sqrt_var = sqrt_var
+        self.function = function
         self.verbose = verbose
         self.compiled = compiled
 
@@ -38,7 +38,7 @@ class TorchFuncJacobianBackend(AbstractBackend):
 
         def function(params, inputs):
             predictions = torch.func.functional_call(self.model, params, (inputs,))
-            return self.sqrt_var(lambda predictions: predictions, predictions)
+            return self.function(predictions)
 
         params_dict = dict(layer_collection.named_parameters(layerid_to_mod))
         v_dict = {}  # replace with function in PVector ?
@@ -88,7 +88,7 @@ class TorchFuncJacobianBackend(AbstractBackend):
 
         def function(params, inputs):
             predictions = torch.func.functional_call(self.model, params, (inputs,))
-            return self.sqrt_var(lambda predictions: predictions, predictions)
+            return self.function(predictions)
 
         so, sb, *_ = pfmap.size()
 
