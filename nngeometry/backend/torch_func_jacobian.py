@@ -36,11 +36,16 @@ class TorchFuncJacobianBackend(AbstractBackend):
         loader = self._get_dataloader(examples)
         n_examples = len(loader.sampler)
 
-        def function(params, inputs):
+        def function(params, inputs, targets=None):
             predictions = torch.func.functional_call(self.model, params, (inputs,))
-            return self.function(predictions)
+            if targets is None:
+                return self.function(predictions)
+            else:
+                return self.function(predictions, targets)
 
         params_dict = dict(layer_collection.named_parameters(layerid_to_mod))
+        params_dict = {k: v.detach() for k, v in params_dict.items()}
+
         v_dict = {}  # replace with function in PVector ?
         for key, value in v.to_dict().items():
             if len(value) > 1:
@@ -58,8 +63,14 @@ class TorchFuncJacobianBackend(AbstractBackend):
 
         for d in self._get_iter_loader(loader):
             inputs = d[0].to(device)
+            if len(d) > 1:
+                targets = d[1].to(device)
+            else:
+                targets = None
 
-            fvp_mb = fvp_fn(partial(function, inputs=inputs), params_dict, v_dict)
+            fvp_mb = fvp_fn(
+                partial(function, inputs=inputs, targets=targets), params_dict, v_dict
+            )
 
             for k in fvp_mb:
                 fvp_dict[k] += fvp_mb[k].detach()
@@ -86,13 +97,18 @@ class TorchFuncJacobianBackend(AbstractBackend):
         loader = self._get_dataloader(examples)
         n_examples = len(loader.sampler)
 
-        def function(params, inputs):
+        def function(params, inputs, targets):
             predictions = torch.func.functional_call(self.model, params, (inputs,))
-            return self.function(predictions)
+            if targets is None:
+                return self.function(predictions)
+            else:
+                return self.function(predictions, targets)
 
         so, sb, *_ = pfmap.size()
 
         params_dict = dict(layer_collection.named_parameters(layerid_to_mod))
+        params_dict = {k: v.detach() for k, v in params_dict.items()}
+
         pfmap_dict = {}
         for layer_id, layer in layer_collection.layers.items():
             d = pfmap.to_torch_layer(layer_id)
@@ -114,9 +130,15 @@ class TorchFuncJacobianBackend(AbstractBackend):
 
         for d in self._get_iter_loader(loader):
             inputs = d[0].to(device)
+            if len(d) > 1:
+                targets = d[1].to(device)
+            else:
+                targets = None
 
             b_fvp_mb = batched_fvp_fn(
-                partial(function, inputs=inputs), params_dict, pfmap_dict
+                partial(function, inputs=inputs, targets=targets),
+                params_dict,
+                pfmap_dict,
             )
 
             for k in b_fvp_mb:

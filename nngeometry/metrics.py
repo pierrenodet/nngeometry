@@ -179,7 +179,7 @@ def FIM(
     if representation == PMatImplicit:
         generator = TorchFuncJacobianBackend(
             model=model,
-            function=partial(SQRT_VAR[variant], lambda predictions: predictions),
+            function=partial(SQRT_VAR[variant], lambda predictions, _: predictions),
             verbose=verbose,
         )
     else:

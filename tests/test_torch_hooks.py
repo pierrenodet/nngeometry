@@ -372,12 +372,13 @@ def test_jacobian_pdense():
             check_ratio(frob_direct, frob_PMat)
 
             # Test spectral
+            evals = torch.linalg.eigvalsh(PMat_dense.to_torch())
             spec_PMat = PMat_dense.norm(2)
-            spec_direct = torch.linalg.eigvalsh(PMat_dense.to_torch()).max()
+            spec_direct = evals.max()
             check_ratio(spec_direct, spec_PMat)
 
             spec_PMat = PMat_dense.norm(-2)
-            spec_direct = torch.linalg.eigvalsh(PMat_dense.to_torch()).min()
+            spec_direct = evals.min()
             torch.testing.assert_close(spec_PMat, spec_direct)
 
             with pytest.raises(RuntimeError):

@@ -41,6 +41,7 @@ class TorchFuncHessianBackend(AbstractBackend):
             return self.function(prediction, y)
 
         params_dict = dict(layer_collection.named_parameters(layerid_to_mod))
+        params_dict = {k: v.detach() for k, v in params_dict.items()}
 
         if self.compiled:
             hessian_fn = torch.compile(torch.func.hessian)
@@ -121,6 +122,8 @@ class TorchFuncHessianBackend(AbstractBackend):
             return self.function(prediction, targets)
 
         params_dict = dict(layer_collection.named_parameters(layerid_to_mod))
+        params_dict = {k: v.detach() for k, v in params_dict.items()}
+
         v_dict = {}  # replace with function in PVector ?
         for key, value in v.to_dict().items():
             if len(value) > 1:
@@ -174,6 +177,8 @@ class TorchFuncHessianBackend(AbstractBackend):
         so, sb, *_ = pfmap.size()
 
         params_dict = dict(layer_collection.named_parameters(layerid_to_mod))
+        params_dict = {k: v.detach() for k, v in params_dict.items()}
+
         pfmap_dict = {}
         for layer_id, layer in layer_collection.layers.items():
             d = pfmap.to_torch_layer(layer_id)
