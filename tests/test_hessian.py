@@ -157,6 +157,76 @@ def test_Hdense_vs_Himplicit():
                 )
 
 
+def test_Fdense_vs_Fimplicit():
+    for get_task in linear_tasks + nonlinear_tasks:
+        loader, lc, parameters, model, function = get_task()
+        model.train()
+
+        F_dense = FIM(
+            layer_collection=lc,
+            model=model,
+            loader=loader,
+            representation=PMatDense,
+            function=function,
+            variant="regression",
+        )
+
+        F_implicit = FIM(
+            layer_collection=lc,
+            model=model,
+            loader=loader,
+            representation=PMatImplicit,
+            function=function,
+            variant="regression",
+        )
+
+        dw = random_pvector(lc)
+        torch.testing.assert_close(
+            F_dense.mv(dw).to_torch(), F_implicit.mv(dw).to_torch()
+        )
+        assert math.isclose(
+            F_dense.vTMv(dw).item(), F_implicit.vTMv(dw).item(), abs_tol=1e-9
+        )
+
+        x = random_pfmap(lc, (10, 3))
+        dense_mmap = F_dense.mmap(x)
+        imp_mmap = F_implicit.mmap(x)
+        for layer_id, layer in lc.layers.items():
+            torch.testing.assert_close(
+                dense_mmap.to_torch_layer(layer_id)[0],
+                imp_mmap.to_torch_layer(layer_id)[0],
+            )
+            if layer.has_bias():
+                torch.testing.assert_close(
+                    dense_mmap.to_torch_layer(layer_id)[1],
+                    imp_mmap.to_torch_layer(layer_id)[1],
+                )
+
+        torch.testing.assert_close(
+            F_dense.solve(dw, regul=1).to_torch(),
+            F_implicit.solve(dw, regul=1, max_iter=10000, rtol=0, atol=1e-5).to_torch(),
+            atol=1e-3,
+            rtol=1e-3,
+        )
+
+        dense_solvepfmap = F_dense.solve(x, regul=1)
+        imp_solvepfmap = F_implicit.solve(x, regul=1, max_iter=200, rtol=0, atol=1e-5)
+        for layer_id, layer in lc.layers.items():
+            torch.testing.assert_close(
+                dense_solvepfmap.to_torch_layer(layer_id)[0],
+                imp_solvepfmap.to_torch_layer(layer_id)[0],
+                atol=1e-3,
+                rtol=1e-3,
+            )
+            if layer.has_bias():
+                torch.testing.assert_close(
+                    dense_solvepfmap.to_torch_layer(layer_id)[1],
+                    imp_solvepfmap.to_torch_layer(layer_id)[1],
+                    atol=1e-3,
+                    rtol=1e-3,
+                )
+
+
 def test_H_vs_linearization():
     step = 1e-5
 

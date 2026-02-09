@@ -177,11 +177,14 @@ def FIM(
         layer_collection = LayerCollection.from_model(model)
 
     if representation == PMatImplicit:
+
+        def function_fim(*d):
+            return SQRT_VAR[variant](lambda predictions, _: predictions, *d)
+
         generator = TorchFuncJacobianBackend(
-            model=model,
-            function=partial(SQRT_VAR[variant], lambda predictions, _: predictions),
-            verbose=verbose,
+            model=model, function=function_fim, verbose=verbose
         )
+
     else:
         if function is None:
 

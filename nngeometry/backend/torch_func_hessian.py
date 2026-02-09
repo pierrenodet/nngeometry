@@ -36,9 +36,9 @@ class TorchFuncHessianBackend(AbstractBackend):
         n_parameters = layer_collection.numel()
         H = torch.zeros((n_parameters, n_parameters), device=device, dtype=dtype)
 
-        def compute_loss(params, X, y):
-            prediction = torch.func.functional_call(self.model, params, (X,))
-            return self.function(prediction, y)
+        def compute_loss(params, inputs, targets):
+            prediction = torch.func.functional_call(self.model, params, (inputs,))
+            return self.function(prediction, targets)
 
         params_dict = dict(layer_collection.named_parameters(layerid_to_mod))
         params_dict = {k: v.detach() for k, v in params_dict.items()}
@@ -50,8 +50,11 @@ class TorchFuncHessianBackend(AbstractBackend):
 
         for d in self._get_iter_loader(loader):
             inputs = d[0].to(device)
+            targets = d[1].to(device)
 
-            H_mb = hessian_fn(compute_loss)(params_dict, inputs, d[1].to(device))
+            H_mb = hessian_fn(partial(compute_loss, inputs=inputs, targets=targets))(
+                params_dict
+            )
 
             for layer_id_x, layer_x in layer_collection.layers.items():
                 start_x = layer_collection.p_pos[layer_id_x]

@@ -100,7 +100,6 @@ class PMatAbstract(ABC):
     def get_device(self):
         raise NotImplementedError
 
-    @abstractmethod
     def vTMv(self, v):
         """
         Computes the quadratic form defined by M in v,
@@ -109,7 +108,7 @@ class PMatAbstract(ABC):
         :param v: vector :math:`v`
         :type v: :class:`.object.vector.PVector`
         """
-        raise NotImplementedError
+        return v.dot(self.mv(v))
 
     def mapTMmap(self, pfmap, reduction="sum"):
         """
@@ -1343,7 +1342,7 @@ class PMatImplicit(PMatAbstract):
                 v, self.examples, layer_collection=self.layer_collection
             )
         else:
-            return v.dot(self.mv(v))
+            return super().vTMv(v)
 
     def trace(self):
         if hasattr(self.generator, "implicit_trace"):
