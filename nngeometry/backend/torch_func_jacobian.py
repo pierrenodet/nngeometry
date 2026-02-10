@@ -23,11 +23,10 @@ def batched_fvp(func, primals, batched_tangents):
 
 
 class TorchFuncJacobianBackend(AbstractBackend):
-    def __init__(self, model, function, verbose=False, compiled=False):
+    def __init__(self, model, function, verbose=False):
         self.model = model
         self.function = function
         self.verbose = verbose
-        self.compiled = compiled
 
     def implicit_mv(self, v, examples, layer_collection):
         layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
@@ -56,11 +55,6 @@ class TorchFuncJacobianBackend(AbstractBackend):
 
         fvp_dict = {k: torch.zeros_like(p) for k, p in params_dict.items()}
 
-        if self.compiled:
-            fvp_fn = torch.compile(fvp)
-        else:
-            fvp_fn = fvp
-
         for d in self._get_iter_loader(loader):
             inputs = d[0].to(device)
             if len(d) > 1:
@@ -68,7 +62,7 @@ class TorchFuncJacobianBackend(AbstractBackend):
             else:
                 targets = None
 
-            fvp_mb = fvp_fn(
+            fvp_mb = fvp(
                 partial(function, inputs=inputs, targets=targets), params_dict, v_dict
             )
 
@@ -123,11 +117,6 @@ class TorchFuncJacobianBackend(AbstractBackend):
             for k, p in params_dict.items()
         }
 
-        if self.compiled:
-            batched_fvp_fn = torch.compile(batched_fvp)
-        else:
-            batched_fvp_fn = batched_fvp
-
         for d in self._get_iter_loader(loader):
             inputs = d[0].to(device)
             if len(d) > 1:
@@ -135,7 +124,7 @@ class TorchFuncJacobianBackend(AbstractBackend):
             else:
                 targets = None
 
-            b_fvp_mb = batched_fvp_fn(
+            b_fvp_mb = batched_fvp(
                 partial(function, inputs=inputs, targets=targets),
                 params_dict,
                 pfmap_dict,
