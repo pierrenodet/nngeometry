@@ -12,7 +12,7 @@ from utils import check_ratio
 
 from nngeometry.backend import TorchHooksJacobianBackend
 from nngeometry.object.map import PFMapDense
-from nngeometry.object.pspace import PMatBlockDiag, PMatEKFAC, PMatKFAC
+from nngeometry.object.pspace import PMatBlockDiag, PMatDense, PMatEKFAC, PMatKFAC
 from nngeometry.object.vector import random_pvector
 
 
@@ -56,6 +56,52 @@ def test_pspace_ekfac_vs_kfac():
         assert torch.norm(M_kfac.to_torch() - M_blockdiag.to_torch()) > torch.norm(
             M_ekfac.to_torch() - M_blockdiag.to_torch()
         )
+
+
+def test_pspace_kpsd_vs_kfac():
+    """
+    Check that EKFAC matrix is closer to block diag one in the
+    sense of the Frobenius norm
+    """
+    for get_task in [
+        # get_linear_3d_task,
+        get_embedding_task,
+        get_conv1d_task,
+        get_fullyconnect_task,
+        get_conv_task,
+    ]:
+        loader, lc, parameters, model, function = get_task()
+        model.train()
+        generator = TorchHooksJacobianBackend(model=model, function=function)
+
+        M_kfac = PMatEKFAC(
+            generator=generator,
+            examples=loader,
+            layer_collection=lc,
+            strategy="one_iter_kpsvd",
+        )
+        M_ekfac = PMatEKFAC(
+            generator=generator,
+            examples=loader,
+            layer_collection=lc,
+            strategy="one_iter_kpsvd",
+        )
+        M_blockdiag = PMatDense(
+            generator=generator, examples=loader, layer_collection=lc
+        )
+
+        # here KFAC and EKFAC should be the same
+        for split in [True, False]:
+            torch.testing.assert_close(
+                M_kfac.to_torch(split_weight_bias=split),
+                M_ekfac.to_torch(split_weight_bias=split),
+            )
+
+        # now we compute the exact diagonal:
+        M_ekfac.update_diag(loader)
+        assert torch.norm(
+            M_kfac.to_torch() - M_blockdiag.to_torch()
+        ) + 1e-10 > torch.norm(M_ekfac.to_torch() - M_blockdiag.to_torch())
 
 
 @pytest.mark.filterwarnings("ignore:It is required")
