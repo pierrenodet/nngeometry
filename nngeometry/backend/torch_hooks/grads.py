@@ -174,8 +174,11 @@ class LinearJacobianFactory(JacobianFactory):
         if layer.has_bias():
             indiv_gb = gy.transpose(1, 2)
             G = torch.cat([G, indiv_gb], dim=2)
-        right_buffer.add_(torch.bmm(G.transpose(1, 2), G).sum(dim=0))
-        left_buffer.add_(torch.bmm(G, G.transpose(1, 2)).sum(dim=0))
+        right_buffer.add_(torch.mm(G.view(-1, G.size(-1)).t(), G.view(-1, G.size(-1))))
+        Gl = G.transpose(1, 2).contiguous()
+        left_buffer.add_(
+            torch.mm(Gl.view(-1, Gl.size(-1)).t(), Gl.view(-1, Gl.size(-1)))
+        )
 
     @classmethod
     def quasidiag(cls, buffer_diag, buffer_cross, mod, layer, x, gy):
@@ -204,8 +207,11 @@ class Conv2dJacobianFactory(JacobianFactory):
         if layer.has_bias():
             indiv_gb = gy.sum(dim=(2, 3)).unsqueeze(2)
             G = torch.cat([G, indiv_gb], dim=2)
-        right_buffer.add_(torch.bmm(G.transpose(1, 2), G).sum(dim=0))
-        left_buffer.add_(torch.bmm(G, G.transpose(1, 2)).sum(dim=0))
+        right_buffer.add_(torch.mm(G.view(-1, G.size(-1)).t(), G.view(-1, G.size(-1))))
+        Gl = G.transpose(1, 2).contiguous()
+        left_buffer.add_(
+            torch.mm(Gl.view(-1, Gl.size(-1)).t(), Gl.view(-1, Gl.size(-1)))
+        )
 
     @classmethod
     def Jv(cls, buffer, mod, layer, x, gy, v, v_bias):
@@ -478,8 +484,11 @@ class Conv1dJacobianFactory(JacobianFactory):
         if layer.has_bias():
             indiv_gb = gy.sum(dim=2).unsqueeze(2)
             G = torch.cat([G, indiv_gb], dim=2)
-        left_buffer.add_(torch.bmm(G, G.transpose(1, 2)).sum(dim=0))
-        right_buffer.add_(torch.bmm(G.transpose(1, 2), G).sum(dim=0))
+        right_buffer.add_(torch.mm(G.view(-1, G.size(-1)).t(), G.view(-1, G.size(-1))))
+        Gl = G.transpose(1, 2).contiguous()
+        left_buffer.add_(
+            torch.mm(Gl.view(-1, Gl.size(-1)).t(), Gl.view(-1, Gl.size(-1)))
+        )
 
     @classmethod
     def Jv(cls, buffer, mod, layer, x, gy, v, v_bias):
