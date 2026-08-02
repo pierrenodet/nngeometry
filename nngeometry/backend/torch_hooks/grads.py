@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 
+from nngeometry.backend.torch_hooks.grad_mha import mha_backward_to_qkv
 from nngeometry.layercollection import (
     Affine1dLayer,
     BatchNorm1dLayer,
@@ -13,6 +14,7 @@ from nngeometry.layercollection import (
     GroupNormLayer,
     LayerNormLayer,
     LinearLayer,
+    MultiheadAttentionLayer,
     RMSNormLayer,
     WeightNorm1dLayer,
     WeightNorm2dLayer,
@@ -619,6 +621,31 @@ class EmbeddingJacobianFactory(JacobianFactory):
         right_buffer.add_(torch.bmm(G, G.transpose(1, 2)).sum(dim=0))
 
 
+def check_mha_arguments(mod):
+    # check that embedding layers are set up with supported arguments
+    if not mod._qkv_same_embed_dim:
+        raise NotImplementedError("""NNGeometry's Torch Hook backend can currently only
+            handle MultiheadAttention layers with self-attention arguments""")
+
+
+class MulitheadAttentionJacobianFactory(JacobianFactory):
+    @classmethod
+    def flat_grad(cls, buffer, mod, layer, x, gy):
+        check_mha_arguments(mod)
+        if not mod.batch_first:
+            x, gy = x.transpose(0, 1), gy.transpose(0, 1)
+        gy_qkv = mha_backward_to_qkv(mod, x, gy)
+        LinearJacobianFactory.flat_grad(buffer, mod, layer, x, gy_qkv)
+
+    @classmethod
+    def Jv(cls, buffer, mod, layer, x, gy, v, v_bias):
+        check_mha_arguments(mod)
+        if not mod.batch_first:
+            x, gy = x.transpose(0, 1), gy.transpose(0, 1)
+        gy_qkv = mha_backward_to_qkv(mod, x, gy)
+        LinearJacobianFactory.Jv(buffer, mod, layer, x, gy_qkv, v, v_bias)
+
+
 FactoryMap = {
     LinearLayer: LinearJacobianFactory,
     Conv1dLayer: Conv1dJacobianFactory,
@@ -634,4 +661,5 @@ FactoryMap = {
     LayerNormLayer: LayerNormJacobianFactory,
     RMSNormLayer: RMSNormJacobianFactory,
     EmbeddingLayer: EmbeddingJacobianFactory,
+    MultiheadAttentionLayer: MulitheadAttentionJacobianFactory,
 }

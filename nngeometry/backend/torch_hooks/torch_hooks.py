@@ -831,6 +831,8 @@ class TorchHooksJacobianBackend(AbstractBackend):
 
         def _hook_x(mod, i, o, layer_id):
             hook_x(mod, i)
+            if isinstance(o, tuple):
+                o = o[0]
             o.register_hook(
                 lambda g_o: hook_gy(
                     mod, g_o, layer_id=layer_id, layer_collection=layer_collection

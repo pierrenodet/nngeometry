@@ -29,7 +29,7 @@ class LayerCollection:
         "Embedding",
         "RMSNorm",
         "MultiheadAttention",
-        "NonDynamicallyQuantizableLinear",
+        # "NonDynamicallyQuantizableLinear",
     ]
 
     def __init__(self, layers=None):
@@ -60,6 +60,8 @@ class LayerCollection:
             mod_class = mod.__class__.__name__
             if mod_class in LayerCollection._known_modules:
                 lc.add_layer(layer, LayerCollection._module_to_layer(mod))
+            elif mod_class in ["NonDynamicallyQuantizableLinear"]:
+                pass
             elif not ignore_unsupported_layers:
                 if len(list(mod.children())) == 0 and len(list(mod.parameters())) > 0:
                     raise Exception("I do not know what to do with layer " + str(mod))
@@ -69,20 +71,20 @@ class LayerCollection:
     def get_layerid_module_map(self, model):
         layerid_to_module = OrderedDict()
         named_modules = dict(model.named_modules())
-        for layer in self.layers.keys():
-            layerid_to_module[layer] = named_modules[layer]
+        for name, layer in self.layers.items():
+            module = named_modules[name]
+            if isinstance(layer, MultiheadAttentionLayer):
+                module.weight = module.in_proj_weight
+                if layer.has_bias():
+                    module.bias = module.in_proj_bias
+            layerid_to_module[name] = module
+
         return layerid_to_module
 
     def add_layer(self, name, layer):
-        if isinstance(layer, LayerCollection):
-            for n, l in layer.layers.items():
-                self.layers[f"{name}.{n}"] = l
-                self.p_pos[f"{name}.{n}"] = self._numel
-                self._numel += l.numel()
-        else:
-            self.layers[name] = layer
-            self.p_pos[name] = self._numel
-            self._numel += layer.numel()
+        self.layers[name] = layer
+        self.p_pos[name] = self._numel
+        self._numel += layer.numel()
 
     def add_layer_from_model(self, model, module):
         """
@@ -165,35 +167,15 @@ class LayerCollection:
                 embedding_dim=mod.embedding_dim, num_embeddings=mod.num_embeddings
             )
         elif mod_class == "MultiheadAttention":
-            lc_mha = LayerCollection()
-            if mod._qkv_same_embed_dim:
-                lc_mha.add_layer(
-                    "in_proj_weight",
-                    LinearLayer(
-                        3 * mod.embed_dim,
-                        mod.embed_dim,
-                        bias=mod.in_proj_bias is not None,
-                    ),
-                )
-            else:
-                lc_mha.add_layer("q_proj_weight", LinearLayer(mod.embed_dim, mod.embed_dim))
-                lc_mha.add_layer(
-                    "k_proj_weight",
-                    LinearLayer(mod.embed_dim, mod.k_dim, bias=mod.bias_k is not None),
-                )
-                lc_mha.add_layer(
-                    "v_proj_weight",
-                    LinearLayer(mod.embed_dim, mod.v_dim, bias=mod.bias_v is not None),
-                )
-            lc_mha.add_layer(
-                "out_proj",
-                LinearLayer(
-                    mod.embed_dim, mod.embed_dim, bias=mod.out_proj.bias is not None
-                ),
+            return MultiheadAttentionLayer(
+                embed_dim=mod.embed_dim, bias=mod.in_proj_bias is not None
             )
-            return lc_mha
-        elif mod_class == "NonDynamicallyQuantizableLinear":  # dealt with mha
-            return LayerCollection()
+        elif mod_class == "NonDynamicallyQuantizableLinear":  # out proj of mha
+            return LinearLayer(
+                in_features=mod.in_features,
+                out_features=mod.out_features,
+                bias=(mod.bias is not None),
+            )
 
     def numel(self):
         """
@@ -515,6 +497,25 @@ class Affine1dLayer(AbstractLayer):
 
     def __eq__(self, other):
         return self.num_features == other.num_features
+
+
+class MultiheadAttentionLayer(AbstractLayer):
+    def __init__(self, embed_dim, bias=True):
+        self.embed_dim = embed_dim
+        self.weight = Parameter(3 * embed_dim, embed_dim)
+        if bias:
+            self.bias = Parameter(3 * embed_dim)
+        else:
+            self.bias = None
+
+    def numel(self):
+        if self.has_bias():
+            return self.weight.numel() + self.bias.numel()
+        else:
+            return self.weight.numel()
+
+    def __eq__(self, other):
+        return self.embed_dim == other.embed_dim
 
 
 class Parameter(object):
