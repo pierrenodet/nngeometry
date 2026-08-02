@@ -28,6 +28,8 @@ class LayerCollection:
         "LayerNorm",
         "Embedding",
         "RMSNorm",
+        "MultiheadAttention",
+        "NonDynamicallyQuantizableLinear",
     ]
 
     def __init__(self, layers=None):
@@ -72,9 +74,15 @@ class LayerCollection:
         return layerid_to_module
 
     def add_layer(self, name, layer):
-        self.layers[name] = layer
-        self.p_pos[name] = self._numel
-        self._numel += layer.numel()
+        if isinstance(layer, LayerCollection):
+            for n, l in layer.layers.items():
+                self.layers[f"{name}.{n}"] = l
+                self.p_pos[f"{name}.{n}"] = self._numel
+                self._numel += l.numel()
+        else:
+            self.layers[name] = layer
+            self.p_pos[name] = self._numel
+            self._numel += layer.numel()
 
     def add_layer_from_model(self, model, module):
         """
@@ -86,13 +94,14 @@ class LayerCollection:
         """
         if module.__class__.__name__ not in LayerCollection._known_modules:
             raise NotImplementedError
-        for layer, mod in model.named_modules():
+        for name, mod in model.named_modules():
             if mod is module:
-                self.add_layer(layer, LayerCollection._module_to_layer(mod))
+                layer = LayerCollection._module_to_layer(mod)
+                self.add_layer(name, layer)
 
     def _module_to_layer(mod):
         mod_class = mod.__class__.__name__
-        if mod_class in ["Linear", "NonDynamicallyQuantizableLinear"]:
+        if mod_class == "Linear":
             return LinearLayer(
                 in_features=mod.in_features,
                 out_features=mod.out_features,
@@ -155,6 +164,36 @@ class LayerCollection:
             return EmbeddingLayer(
                 embedding_dim=mod.embedding_dim, num_embeddings=mod.num_embeddings
             )
+        elif mod_class == "MultiheadAttention":
+            lc_mha = LayerCollection()
+            if mod._qkv_same_embed_dim:
+                lc_mha.add_layer(
+                    "in_proj_weight",
+                    LinearLayer(
+                        3 * mod.embed_dim,
+                        mod.embed_dim,
+                        bias=mod.in_proj_bias is not None,
+                    ),
+                )
+            else:
+                lc_mha.add_layer("q_proj_weight", LinearLayer(mod.embed_dim, mod.embed_dim))
+                lc_mha.add_layer(
+                    "k_proj_weight",
+                    LinearLayer(mod.embed_dim, mod.k_dim, bias=mod.bias_k is not None),
+                )
+                lc_mha.add_layer(
+                    "v_proj_weight",
+                    LinearLayer(mod.embed_dim, mod.v_dim, bias=mod.bias_v is not None),
+                )
+            lc_mha.add_layer(
+                "out_proj",
+                LinearLayer(
+                    mod.embed_dim, mod.embed_dim, bias=mod.out_proj.bias is not None
+                ),
+            )
+            return lc_mha
+        elif mod_class == "NonDynamicallyQuantizableLinear":  # dealt with mha
+            return LayerCollection()
 
     def numel(self):
         """

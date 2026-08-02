@@ -731,17 +731,20 @@ def get_vit_task(torch_attention=False):
     def output_fn(input, target):
         return net(to_device(input))
 
-    layer_collection = LayerCollection.from_model(net, ignore_unsupported_layers=True)
+    layer_collection = LayerCollection.from_model(net, ignore_unsupported_layers=False)
 
     to_remove = ["cls_token", "position_embeddings"]  # nn.Parameter
-    if torch_attention:
-        to_remove += ["attention"]
+    # if torch_attention:
+    #     to_remove += ["attention"]
 
     parameters = [
         p
         for n, p in net.named_parameters()
         if not any([n.startswith(ln) for ln in to_remove])
     ]
+
+    # print([n for n, p in net.named_parameters()])
+    # print(layer_collection.layers)
 
     return (train_loader, layer_collection, parameters, net, output_fn)
 
