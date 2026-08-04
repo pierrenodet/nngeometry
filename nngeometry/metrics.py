@@ -1,5 +1,4 @@
 from enum import StrEnum
-from functools import partial
 
 import torch
 from torch.distributions.multivariate_normal import MultivariateNormal
@@ -243,11 +242,11 @@ def GradientSecondMoment(
     if layer_collection is None:
         layer_collection = LayerCollection.from_model(model)
 
-    def function_ef(*d):
+    def function_gsm(*d):
         return function(model(d[0].to(device)), d[1].to(device))
 
     generator = TorchHooksJacobianBackend(
-        model=model, function=function_ef, verbose=verbose, centering=centering
+        model=model, function=function_gsm, verbose=verbose, centering=centering
     )
 
     return representation(
@@ -271,8 +270,6 @@ def sqrt_var_classif_logits(logits):
     # with Applications
     # Kunio Tanabe and Masahiko Sagae 1992
 
-    x = logits  # match notation paper
-
     def _proj_to_L_multinomial(x, p, q):
         # n -> n-1
         eps = torch.finfo(p.dtype).eps
@@ -284,7 +281,8 @@ def sqrt_var_classif_logits(logits):
         eps = torch.finfo(p.dtype).eps
         return p[:, :-1] * q[:, :-1] / torch.clip(p[:, :-1] + q[:, :-1], eps, 1)
 
-    p = torch.softmax(logits, dim=1).detach()
+    x = logits  # notation paper
+    p = torch.softmax(x, dim=1).detach()
     q = 1 - p.cumsum(dim=1)
 
     # Multiply by L
