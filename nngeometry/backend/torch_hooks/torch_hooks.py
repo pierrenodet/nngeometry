@@ -698,107 +698,13 @@ class TorchHooksJacobianBackend(AbstractBackend):
 
         return PVector(layer_collection=layer_collection, dict_repr=output_dict)
 
-    # @instance_buffer_handles
-    # def implicit_mmap(self, pfmap, examples, layer_collection):
-    #     print("new implem")
-    #     layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
-    #     # add hooks
-    #     self._handles += self._add_hooks(
-    #         self._hook_savex,
-    #         self._hook_compute_Jv_batch,
-    #         layerid_to_mod,
-    #         layer_collection,
-    #     )
-
-    #     so, sb, *_ = pfmap.size()
-    #     n_vecs = so * sb
-
-    #     self._buffer["V"] = dict()
-    #     parameters = []
-    #     outputs = [dict() for _ in range(n_vecs)]
-    #     for layer_id, layer in layer_collection.layers.items():
-    #         mod = layerid_to_mod[layer_id]
-    #         mod_class = mod.__class__.__name__
-    #         if mod_class in ["BatchNorm1d", "BatchNorm2d"]:
-    #             raise NotImplementedError
-
-    #         d = pfmap.to_torch_layer(layer_id)
-    #         v_weight = d[0].reshape(n_vecs, *layer.weight.size)
-    #         v_bias = (
-    #             d[1].reshape(n_vecs, *layer.bias.size) if layer.has_bias() else None
-    #         )
-    #         self._buffer["V"][layer_id] = (v_weight, v_bias)
-
-    #         parameters.append(mod.weight)
-    #         for output in outputs:
-    #             output[mod.weight] = torch.zeros_like(mod.weight)
-    #         if layer.has_bias():
-    #             parameters.append(mod.bias)
-    #             for output in outputs:
-    #                 output[mod.bias] = torch.zeros_like(mod.bias)
-
-    #     device = self._check_same_device(layerid_to_mod.values())
-    #     dtype = self._check_same_dtype(layerid_to_mod.values())
-    #     loader = self._get_dataloader(examples)
-    #     n_examples = len(loader.sampler)
-
-    #     for d in self._get_iter_loader(loader):
-    #         self._buffer["xs"] = dict()
-    #         inputs = d[0]
-    #         grad_wrt = self._infer_differentiable_leafs(inputs, layerid_to_mod.values())
-    #         bs = inputs.size(0)
-
-    #         f_output = self.function(*d).view(bs, -1)
-    #         n_output = f_output.size(-1)
-    #         pseudo_loss = 0
-    #         for i in range(n_output):
-    #             self._buffer["Jv"] = torch.zeros(
-    #                 (n_vecs, bs), device=device, dtype=dtype
-    #             )
-
-    #             self._buffer["compute_switch"] = True
-    #             torch.autograd.grad(
-    #                 f_output[:, i].sum(dim=0),
-    #                 grad_wrt,
-    #                 retain_graph=True,
-    #                 only_inputs=True,
-    #             )
-    #             pseudo_loss = pseudo_loss + torch.mv(self._buffer["Jv"], f_output[:, i])
-
-    #         self._buffer["compute_switch"] = False
-    #         for k in range(n_vecs):
-    #             grads = torch.autograd.grad(
-    #                 pseudo_loss[k],
-    #                 parameters,
-    #                 retain_graph=k < n_vecs - 1,
-    #                 only_inputs=True,
-    #             )
-    #             for i_p, p in enumerate(parameters):
-    #                 outputs[k][p].add_(grads[i_p])
-
-    #     output_dict = dict()
-    #     for layer_id, layer in layer_collection.layers.items():
-    #         mod = layerid_to_mod[layer_id]
-    #         w_stack = torch.stack([outputs[k][mod.weight] for k in range(n_vecs)])
-    #         w_stack = (w_stack / n_examples).view(so, sb, -1)
-    #         if layer.has_bias():
-    #             b_stack = torch.stack([outputs[k][mod.bias] for k in range(n_vecs)])
-    #             b_stack = (b_stack / n_examples).view(so, sb, -1)
-    #             output_dict[layer_id] = (w_stack, b_stack)
-    #         else:
-    #             output_dict[layer_id] = (w_stack,)
-
-    #     return PFMapDense.from_dict(
-    #         layer_collection=layer_collection, generator=self, data_dict=output_dict
-    #     )
-
     @instance_buffer_handles
     def implicit_mmap(self, pfmap, examples, layer_collection):
-        print("batched implem")
         layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
+        # add hooks
         self._handles += self._add_hooks(
             self._hook_savex,
-            self._hook_compute_Jv_batch,
+            self._hook_compute_batched_Jv,
             layerid_to_mod,
             layer_collection,
         )
@@ -808,10 +714,11 @@ class TorchHooksJacobianBackend(AbstractBackend):
 
         self._buffer["V"] = dict()
         parameters = []
-        output = dict()  # one dict, stacked over n_vecs, instead of a list of K dicts
+        outputs = [dict() for _ in range(n_vecs)]
         for layer_id, layer in layer_collection.layers.items():
             mod = layerid_to_mod[layer_id]
-            if mod.__class__.__name__ in ["BatchNorm1d", "BatchNorm2d"]:
+            mod_class = mod.__class__.__name__
+            if mod_class in ["BatchNorm1d", "BatchNorm2d"]:
                 raise NotImplementedError
 
             d = pfmap.to_torch_layer(layer_id)
@@ -822,24 +729,17 @@ class TorchHooksJacobianBackend(AbstractBackend):
             self._buffer["V"][layer_id] = (v_weight, v_bias)
 
             parameters.append(mod.weight)
-            output[mod.weight] = torch.zeros(
-                (n_vecs, *mod.weight.shape),
-                device=mod.weight.device,
-                dtype=mod.weight.dtype,
-            )
+            for output in outputs:
+                output[mod.weight] = torch.zeros_like(mod.weight)
             if layer.has_bias():
                 parameters.append(mod.bias)
-                output[mod.bias] = torch.zeros(
-                    (n_vecs, *mod.bias.shape),
-                    device=mod.bias.device,
-                    dtype=mod.bias.dtype,
-                )
+                for output in outputs:
+                    output[mod.bias] = torch.zeros_like(mod.bias)
 
         device = self._check_same_device(layerid_to_mod.values())
         dtype = self._check_same_dtype(layerid_to_mod.values())
         loader = self._get_dataloader(examples)
         n_examples = len(loader.sampler)
-        grad_outputs = torch.eye(n_vecs, device=device, dtype=dtype)
 
         for d in self._get_iter_loader(loader):
             self._buffer["xs"] = dict()
@@ -864,23 +764,24 @@ class TorchHooksJacobianBackend(AbstractBackend):
                 pseudo_loss = pseudo_loss + torch.mv(self._buffer["Jv"], f_output[:, i])
 
             self._buffer["compute_switch"] = False
-            grads = torch.autograd.grad(
-                pseudo_loss,
-                parameters,
-                grad_outputs=grad_outputs,
-                is_grads_batched=True,
-                retain_graph=False,
-                only_inputs=True,
-            )
-            for i_p, p in enumerate(parameters):
-                output[p].add_(grads[i_p])
+            for k in range(n_vecs):
+                grads = torch.autograd.grad(
+                    pseudo_loss[k],
+                    parameters,
+                    retain_graph=k < n_vecs - 1,
+                    only_inputs=True,
+                )
+                for i_p, p in enumerate(parameters):
+                    outputs[k][p].add_(grads[i_p])
 
         output_dict = dict()
         for layer_id, layer in layer_collection.layers.items():
             mod = layerid_to_mod[layer_id]
-            w_stack = (output[mod.weight] / n_examples).view(so, sb, -1)
+            w_stack = torch.stack([outputs[k][mod.weight] for k in range(n_vecs)])
+            w_stack = (w_stack / n_examples).view(so, sb, -1)
             if layer.has_bias():
-                b_stack = (output[mod.bias] / n_examples).view(so, sb, -1)
+                b_stack = torch.stack([outputs[k][mod.bias] for k in range(n_vecs)])
+                b_stack = (b_stack / n_examples).view(so, sb, -1)
                 output_dict[layer_id] = (w_stack, b_stack)
             else:
                 output_dict[layer_id] = (w_stack,)
@@ -1172,7 +1073,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
                 v_bias,
             )
 
-    def _hook_compute_Jv_batch(self, mod, gy, layer_id, layer_collection):
+    def _hook_compute_batched_Jv(self, mod, gy, layer_id, layer_collection):
         if self._buffer["compute_switch"]:
             x = self._buffer["xs"][mod]
             layer = layer_collection.layers[layer_id]
