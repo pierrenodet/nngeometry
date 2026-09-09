@@ -411,11 +411,11 @@ class FVector:
     def to_torch(self):
         return self.vector_repr
 
-    def dot(self, other):
-        return torch.dot(self.to_torch().view(-1), other.to_torch().view(-1))
+    def __add__(self, other):
+        return FVector(self.vector_repr + other.vector_repr)
 
-    def __matmul__(self, other):
-        if isinstance(other, FVector):
-            return self.dot(other)
-        else:
-            return NotImplemented
+    def __sub__(self, other):
+        return FVector(self.vector_repr - other.vector_repr)
+
+    def __rmul__(self, other):
+        return FVector(other * self.vector_repr)

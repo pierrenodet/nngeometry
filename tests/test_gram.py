@@ -73,29 +73,9 @@ def test_gram_vs_jacobian():
         asym_gram = FMatDense(
             lc, gram.generator, data=torch.rand(gram.size(0), gram.size(1), 25, 10)
         )
-        torch.testing.assert_close(
-            (gram @ asym_gram).adjoint().to_torch(),
-            (asym_gram.adjoint() @ gram).to_torch(),
-        )
-        torch.testing.assert_close(
-            (asym_gram @ df2).to_torch(), (df2 @ asym_gram.adjoint()).to_torch()
-        )
-        torch.testing.assert_close(
-            (asym_gram.adjoint() @ df1).to_torch(), (df1 @ asym_gram).to_torch()
-        )
-        torch.testing.assert_close(
-            asym_gram.adjoint().adjoint().to_torch(), asym_gram.to_torch()
-        )
-
         # unsupported operations on asymetric gram matrices
         with pytest.raises(RuntimeError):
-            df2 @ asym_gram
-        with pytest.raises(RuntimeError):
             asym_gram @ df1
-        with pytest.raises(RuntimeError):
-            asym_gram.vTMv(df1)
-        with pytest.raises(RuntimeError):
-            asym_gram.mTMm(asym_gram)
         with pytest.raises(RuntimeError):
             asym_gram.compute_eigendecomposition(impl="eigh")
         with pytest.raises(RuntimeError):

@@ -69,13 +69,12 @@ def test_dense():
             torch.mm(pfmap.to_torch().view(3 * 4, -1), M_dense1_tensor).view(3, 4, -1),
             (M_dense1 @ pfmap.adjoint()).adjoint().to_torch(),
         )
-        torch.testing.assert_close(
-            (M_dense1 @ pfmap.adjoint()).adjoint().to_torch(),
-            (pfmap @ M_dense1).to_torch(),
-        )
 
+        M_dense1 @ pfmap.adjoint()
         with pytest.raises(TypeError):
             M_dense1 @ pfmap
+        with pytest.raises(TypeError):
+            pfmap @ M_dense1
         with pytest.raises(TypeError):
             pfmap.adjoint() @ M_dense1
 
@@ -84,7 +83,6 @@ def test_dense():
         torch.testing.assert_close(
             torch.mv(M_dense1_tensor, v.to_torch()), (M_dense1 @ v).to_torch()
         )
-        torch.testing.assert_close((M_dense1 @ v).to_torch(), (v @ M_dense1).to_torch())
 
         ## matmul with pmat
         torch.testing.assert_close(

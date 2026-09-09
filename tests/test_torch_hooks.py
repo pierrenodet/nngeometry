@@ -232,7 +232,16 @@ def test_jacobian_fdense_vs_pullback():
             )
 
             n_output = FMat_dense.to_torch().size(0)
+
+            # Test mv
             df = random_fvector(len(loader.sampler), n_output, device=device)
+            Mv_PMat = FMat_dense.mv(df)
+            vjp = pull_back.vjp(df)
+            Mv_pf_pb = pull_back.jvp(vjp)
+            check_tensors(
+                Mv_pf_pb.to_torch(),
+                Mv_PMat.to_torch(),
+            )
 
             # Test to_torch to get dense tensor
             jacobian = pull_back.to_torch()
@@ -246,16 +255,27 @@ def test_jacobian_fdense_vs_pullback():
                 eps=1e-4,
             )
 
-            # Test vTMv
-            vTMv_FMat = FMat_dense.vTMv(df)
-            Jv_pullback = pull_back.vjp(df).to_torch()
-            vTMv_pullforward = torch.dot(Jv_pullback, Jv_pullback)
-            check_ratio(vTMv_pullforward, vTMv_FMat)
+
+def test_jacobian_fdense():
+    for get_task in linear_tasks + nonlinear_tasks:
+        for centering in [True, False]:
+            loader, lc, parameters, model, function = get_task()
+            generator = TorchHooksJacobianBackend(
+                model=model,
+                function=function,
+                centering=centering,
+            )
+            FMat_dense = FMatDense(
+                generator=generator, examples=loader, layer_collection=lc
+            )
 
             # Test frobenius
             frob_FMat = FMat_dense.norm()
             frob_direct = (FMat_dense.to_torch() ** 2).sum() ** 0.5
             check_ratio(frob_direct, frob_FMat)
+
+            with pytest.raises(RuntimeError):
+                FMat_dense.norm("prout")
 
             # Test trace
             trace_FMat = FMat_dense.trace()
@@ -264,8 +284,17 @@ def test_jacobian_fdense_vs_pullback():
             trace_eigh = evals.sum()
             check_ratio(trace_FMat, trace_eigh)
 
-            with pytest.raises(RuntimeError):
-                FMat_dense.norm("prout")
+            n_examples = len(loader.sampler)
+            n_output = FMat_dense.to_torch().size(0)
+            df = random_fvector(n_examples, n_output, device=device)
+
+            # Test inv
+            regul = 1e-3
+            FMat_inv = FMat_dense.inv(regul=regul)
+            torch.testing.assert_close(
+                df.to_torch(),
+                FMat_inv.mv(FMat_dense.mv(df) + n_examples * regul * df).to_torch(),
+            )
 
 
 def test_jacobian_eigendecomposition_fdense():

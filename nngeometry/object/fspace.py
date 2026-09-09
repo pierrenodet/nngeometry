@@ -1,6 +1,5 @@
 import warnings
 from abc import ABC, abstractmethod
-from functools import lru_cache
 
 import torch
 
@@ -22,13 +21,6 @@ class FMatAbstract(ABC):
             return self.mmap(other)
         else:
             return NotImplemented
-
-    # assumes symetric by default
-    def adjoint(self):
-        return self
-
-    def __rmatmul__(self, other):
-        return self.adjoint() @ other
 
     @abstractmethod
     def solveFVec(self, x, regul, solve, **kwargs):
@@ -108,12 +100,6 @@ class FMatDense(FMatAbstract):
             data=torch.mm(M, J).view(sM[0], sM[1], sJ[2]),
         )
 
-    def vTMv(self, v):
-        return v @ self.mv(v)
-
-    def mTMm(self, fmat):
-        return fmat.adjoint() @ self.mm(fmat)
-
     def frobenius_norm(self):
         warnings.warn(
             """Use norm(ord="fro") instead""", DeprecationWarning, stacklevel=2
@@ -135,13 +121,6 @@ class FMatDense(FMatAbstract):
 
     def to_torch(self):
         return self.data
-
-    def adjoint(self):
-        return FMatDense(
-            self.layer_collection,
-            self.generator,
-            data=self.data.permute(2, 3, 0, 1),
-        )
 
     def __add__(self, other):
         return FMatDense(

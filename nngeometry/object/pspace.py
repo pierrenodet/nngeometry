@@ -97,14 +97,6 @@ class PMatAbstract(ABC):
         else:
             return NotImplemented
 
-    def __rmatmul__(self, other):
-        if isinstance(other, PVector):
-            return self.mv(other)
-        elif isinstance(other, PFMap):
-            return self.mmap(other)
-        else:
-            return NotImplemented
-
     @abstractmethod
     def get_device(self):
         raise NotImplementedError
