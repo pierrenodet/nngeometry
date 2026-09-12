@@ -15,8 +15,6 @@ class FMatAbstract(ABC):
     def __matmul__(self, other):
         if isinstance(other, FVector):
             return self.mv(other)
-        elif isinstance(other, type(self)):
-            return self.mm(other)
         elif isinstance(other, PFMap):
             return self.mmap(other)
         else:
@@ -27,7 +25,7 @@ class FMatAbstract(ABC):
         pass
 
     @abstractmethod
-    def solveFMat(self, x, regul, solve, **kwargs):
+    def solvePFMap(self, x, regul, solve, **kwargs):
         pass
 
     def solve(self, x, regul=1e-8, solve="default", **kwargs):
@@ -38,15 +36,17 @@ class FMatAbstract(ABC):
             or high-pass filter)
         :type regul: float
         :param b: b
-        :type b: FVector or FMat
+        :type b: FVector or PFMap
         :param solve: solve implementation, this is dependent on the FMat representation
         """
         if isinstance(x, FVector):
             return self.solveFVec(x, regul=regul, solve=solve, **kwargs)
-        elif isinstance(x, FMatDense):
-            return self.solveFMat(x, regul=regul, solve=solve, **kwargs)
+        elif isinstance(x, PFMapDense):
+            return self.solvePFMap(x, regul=regul, solve=solve, **kwargs)
         else:
-            raise NotImplementedError("`x` should be an instance of FVector or FMat")
+            raise NotImplementedError(
+                "`x` should be an instance of FVector or PFMap"
+            )
 
 
 class FMatDense(FMatAbstract):
@@ -77,17 +77,6 @@ class FMatDense(FMatAbstract):
         M = self.data.view(s[0] * s[1], s[2] * s[3])
         v_flat = v.to_torch().view(-1)
         return FVector(vector_repr=torch.mv(M, v_flat).view(s[0], s[1]))
-
-    def mm(self, fmat):
-        sM = self.data.size()
-        M = self.data.view(-1, sM[2] * sM[3])
-        sN = fmat.data.size()
-        N = fmat.data.view(sN[0] * sN[1], -1)
-        return FMatDense(
-            self.layer_collection,
-            self.generator,
-            data=torch.mm(M, N).view(sM[0], sM[1], sN[2], sN[3]),
-        )
 
     def mmap(self, pfmap):
         sM = self.data.size()
@@ -143,16 +132,6 @@ class FMatDense(FMatAbstract):
             data=other * self.data,
         )
 
-    def __pow__(self, other):
-        s = self.data.size()
-        return FMatDense(
-            layer_collection=self.layer_collection,
-            generator=self.generator,
-            data=torch.linalg.matrix_power(
-                self.data.view(s[0] * s[1], s[2] * s[3]), other
-            ).view(*s),
-        )
-
     def _cholesky(self, regul=1e-8):
         try:
             assert self._cholesky_regul == regul
@@ -191,17 +170,17 @@ class FMatDense(FMatAbstract):
 
         return FVector(vector_repr=solution.view(s[0], s[1]))
 
-    def solveFMat(self, fmat, regul=1e-8, solve="default"):
+    def solvePFMap(self, pfmap, regul=1e-8, solve="default"):
         s = self.data.size()
-        sK = fmat.size()
-        K = fmat.to_torch().view(sK[0] * sK[1], -1)
+        sJ = pfmap.size()
+        J = pfmap.to_torch().view(sJ[0] * sJ[1], -1)
         if solve in ["default", "solve"]:
-            solution = torch.cholesky_solve(K, self._cholesky(regul))
+            solution = torch.cholesky_solve(J, self._cholesky(regul))
         else:
             raise NotImplementedError
 
-        return FMatDense(
+        return PFMapDense(
             layer_collection=self.layer_collection,
             generator=self.generator,
-            data=solution.view(s[0], s[1], sK[2], sK[3]),
+            data=solution.view(s[0], s[1], sJ[-1]),
         )
