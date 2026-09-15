@@ -16,7 +16,7 @@ from nngeometry.layercollection import (
 from nngeometry.maths import kronecker
 from nngeometry.object.map import PFMap, PFMapAdjoint, PFMapDense
 from nngeometry.object.vector import PVector
-from nngeometry.solve import block_cg, cg
+from nngeometry.solve import block_cg, block_lanczos, cg, lanczos
 
 
 class PMatAbstract(ABC):
@@ -1421,6 +1421,20 @@ class PMatImplicit(PMatAbstract):
             return block_cg(self, x, regul=regul, **kwargs)
         else:
             raise NotImplementedError
+
+    def compute_eigendecomposition(self, impl="eigh", block_size=1, **kwargs):
+        if impl == "eigh":
+            if block_size == 1:
+                self.evals, self.evecs = lanczos(self, **kwargs)
+            else:
+                self.evals, self.evecs = block_lanczos(
+                    self, block_size=block_size, **kwargs
+                )
+        else:
+            raise NotImplementedError
+
+    def get_eigendecomposition(self):
+        return self.evals, self.evecs
 
     def get_diag(self):
         raise NotImplementedError

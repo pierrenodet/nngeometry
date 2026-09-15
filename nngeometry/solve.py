@@ -1,4 +1,10 @@
+import math
+
 import torch
+from tqdm import tqdm
+
+from nngeometry.object.map import random_pfmap
+from nngeometry.object.vector import random_pvector
 
 
 def cg(A, b, regul=1e-8, x0=None, rtol=1e-5, atol=0, max_iter=None, M=None):
@@ -82,3 +88,137 @@ def block_cg(A, b, regul=1e-8, x0=None, rtol=1e-5, atol=0, max_iter=None, M=None
         p = z + β @ p
         p, _ = qr(p)
     return x
+
+
+def jacobi(a, b):
+    T = torch.diag(a)
+    T.diagonal(-1).add_(b)
+    T.diagonal(1).add_(b)
+    return T
+
+
+def lanczos(A, k, w0=None, max_iter=None, rtol=0, atol=0):
+    lc = A.layer_collection
+
+    # isn't there a better way ?
+    layerid_to_mod = lc.get_layerid_module_map(A.generator.model)
+    device = A.generator._check_same_device(layerid_to_mod.values())
+    dtype = A.generator._check_same_dtype(layerid_to_mod.values())
+
+    if max_iter is None:
+        max_iter = 2 * k
+
+    assert max_iter >= k
+
+    if w0 is None:
+        w0 = random_pvector(lc, device, dtype)
+
+    β = [0, w0.norm()]
+    v = [0 * w0, (1 / β[-1]) * w0]
+    α = [0]
+    for m in tqdm(range(1, max_iter + 1)):
+        w = A @ v[-1] - (β[-1] * v[-2])
+        α.append(v[-1] @ w)
+        w = w - α[-1] * v[-1]
+        for _ in range(2):  # reorthogonalize
+            for i in range(1, len(v)):
+                w = w - (v[i] @ w) * v[i]
+
+        β.append(w.norm())
+        v.append((1 / β[-1]) * w)
+
+        if m >= k:
+            T = jacobi(torch.stack(α[1:]), torch.stack(β[2:-1]))
+            evals, T_evecs = torch.linalg.eigh(T)
+            evals, T_evecs = evals[-k:], T_evecs[:, -k:]
+            r = β[-1] * T_evecs[-1].abs()
+            if torch.all(r <= torch.clamp(rtol * evals.abs(), min=atol)):  # convergence
+                break
+
+        if β[-1] < torch.finfo(dtype).eps:  # breakdown
+            break
+
+    assert m >= k, (
+        f"Lanczos stopped after {m} iterations; cannot produce {k} eigenpairs"
+    )
+
+    V = torch.stack([pvec.to_torch() for pvec in v[1:-1]], dim=0)
+    evecs = V.t() @ T_evecs
+    return evals, evecs
+
+
+def block_jacobi(aa, bb):
+    block_size = aa[0].shape[0]
+    T = torch.block_diag(*aa)
+    if len(bb) > 0:
+        B = torch.block_diag(*bb)
+        T = (
+            T
+            + torch.nn.functional.pad(B.T, (block_size, 0, 0, block_size))
+            + torch.nn.functional.pad(B, (0, block_size, block_size, 0))
+        )
+    return T
+
+
+def block_lanczos(A, k, w0=None, max_iter=None, rtol=0, atol=0, block_size=10):
+    lc = A.layer_collection
+
+    # isn't there a better way ?
+    layerid_to_mod = lc.get_layerid_module_map(A.generator.model)
+    device = A.generator._check_same_device(layerid_to_mod.values())
+    dtype = A.generator._check_same_dtype(layerid_to_mod.values())
+
+    if max_iter is None:
+        max_iter = 2 * math.ceil(k / block_size)
+
+    assert max_iter * block_size >= k
+
+    if w0 is None:
+        w0 = random_pfmap(lc, (block_size, 1), device, dtype)
+    v0, β0 = qr(w0)
+    β = [0, β0]
+    v = [0 * v0, v0]
+    α = [0]
+    for m in tqdm(range(1, max_iter + 1)):
+        w = (A @ v[-1].adjoint()).adjoint() - (β[-1] @ v[-2])
+        α.append(v[-1] @ w.adjoint())
+        w = w - α[-1] @ v[-1]
+        for _ in range(2):  # reorthogonalize
+            for i in range(1, len(v)):
+                w = w - (w @ v[i].adjoint()) @ v[i]
+        Q, R = qr(w)
+        β.append(R)
+        v.append(Q)
+
+        if m * block_size >= k:
+            T = block_jacobi(
+                [a.to_torch().reshape(block_size, block_size) for a in α[1:]],
+                [b.to_torch().reshape(block_size, block_size) for b in β[2:-1]],
+            )
+            evals, T_evecs = torch.linalg.eigh(T)
+            evals, T_evecs = evals[-k:], T_evecs[:, -k:]
+            r = (
+                (
+                    β[-1].to_torch().reshape(block_size, block_size)
+                    @ T_evecs[-block_size:, :].abs()
+                )
+                ** 2
+            ).sum(dim=0)
+            if torch.all(r <= torch.clamp(rtol * evals.abs(), min=atol)):  # convergence
+                break
+
+        β[-1].compute_eigendecomposition(impl="svd")
+        β_evals, _ = β[-1].get_eigendecomposition()
+        if β_evals.min() < torch.finfo(dtype).eps * β_evals.max():  # partial breakdown
+            break
+
+    assert m * block_size >= k, (
+        f"Lanczos stopped after {m} iterations with {block_size} blocks;\
+            cannot produce {k} eigenpairs"
+    )
+
+    V = torch.cat(
+        [pfmap.to_torch().reshape(block_size, -1) for pfmap in v[1:-1]], dim=0
+    )
+    evecs = V.t() @ T_evecs
+    return evals, evecs
