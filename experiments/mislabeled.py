@@ -53,7 +53,7 @@ from nngeometry.backend import TorchHooksJacobianBackend
 from nngeometry.jacobian import Jacobian
 from nngeometry.layercollection import LayerCollection
 from nngeometry.metrics import FIM, FIM_MonteCarlo
-from nngeometry.object.pspace import PMatDense, PMatEKFAC, PMatKFAC
+from nngeometry.object.pspace import PMatBlockDiag, PMatDense, PMatEKFAC, PMatKFAC
 
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
@@ -74,9 +74,9 @@ args = parser.parse_args()
 
 args.dataset = "mnist-1d"
 args.runs = 1
-args.regul = 1e-2
+args.regul = 1e-4
 # args.ft = True
-args.epochs = 50
+args.epochs = 1000
 args.repr = "F_kfac"
 args.competitors = True
 args.seed = 1337
@@ -90,6 +90,9 @@ os.makedirs(args.output_dir, exist_ok=True)
 torch.manual_seed(args.seed)
 
 transform, dataset, model_fn, optimizer_fn, classes = DATASETS[args.dataset]
+
+# model_fn = partial(model_fn, c=16)
+model_fn = partial(model_fn, h=4, d=1)
 
 if transform is not None:
     if hasattr(transform, "transforms"):
@@ -190,7 +193,7 @@ for i in range(args.runs):
     print(record)
     records.append(record)
     # %%
-
+    args.repr = "F_kfac"
     if "last" in args.repr:
         repr = PMatDense
         lc = last_layer(LayerCollection.from_model(model))
@@ -198,6 +201,9 @@ for i in range(args.runs):
         repr = partial(PMatKFAC, strategy="one_iter_kpsvd")
         # repr = PMatKFAC
         # repr = PMatEKFAC
+        lc = supported_kfac_layers(LayerCollection.from_model(model))
+    elif "bd" in args.repr:
+        repr = PMatBlockDiag
         lc = supported_kfac_layers(LayerCollection.from_model(model))
 
     F = FIM(
@@ -237,16 +243,17 @@ for i in range(args.runs):
         F.update_diag(noisy_train)
 
     N = noisy_examples.shape[0]
-    # if hasattr(F, "__rmul__"):
-    F = N * F
-    # else:  # kfac
-    #     for layer_id, layer in tqdm(lc.layers.items()):
-    #         a, g = F.data[layer_id]
-    #         a *= N
-    #         g *= N
-
+    if hasattr(F, "__rmul__"):
+        F = N * F
+    else:  # kfac
+        for layer_id, layer in tqdm(lc.layers.items()):
+            a, g = F.data[layer_id]
+            a *= N**0.5
+            g *= N**0.5
     # %%
-    args.regul = 1e-5
+    avg_lam = F.trace() / F.layer_collection.numel()
+    print(avg_lam)
+    args.regul = 1e1
     light_noisy_noaug = DataLoader(noisy_train_set, batch_size=32)
 
     self_influence = []
@@ -354,54 +361,186 @@ for i in range(args.runs):
                 if layer.has_bias():
                     G = torch.cat([G, Gb.view(bs, -1, 1)], dim=2)
 
+                if layer.has_bias():
+                    Jw, Jb = pfmap_func.to_torch_layer(layer_id)
+                else:
+                    Jw = pfmap_func.to_torch_layer(layer_id)[0]
+                sJ = Jw.size()
+                bs = sJ[0] * sJ[1]
+                J = Jw.view(bs, sJ[2], -1)
+                if layer.has_bias():
+                    J = torch.cat([J, Jb.view(bs, -1, 1)], dim=2)
+
+                G = G.unsqueeze(0)
+                J = J.reshape(sJ[0], sJ[1], *J.shape[1:])
+
                 solve_g = torch.cholesky_solve(G, cache[layer_id]["Lg"])
                 solve_ga = torch.cholesky_solve(
-                    solve_g.transpose(1, 2), cache[layer_id]["La"]
-                )
-                solve_ga = solve_ga.transpose(1, 2)
+                    solve_g.transpose(-1, -2), cache[layer_id]["La"]
+                ).transpose(-1, -2)
                 si += torch.einsum(
                     "onp, Onp->noO",
                     G.view(sG[0], sG[1], -1),
                     solve_ga.view(sG[0], sG[1], -1),
                 )
 
-                solve_a = torch.cholesky_solve(G.transpose(1, 2), cache[layer_id]["La"])
+                solve_j_g = torch.cholesky_solve(J, cache[layer_id]["Lg"])
+                schur_g = torch.eye(
+                    J.size(-1),
+                    dtype=J.dtype,
+                    device=J.device,
+                ).expand(J.size(0), J.size(1), -1, -1) - (
+                    J.transpose(-1, -2) @ solve_j_g
+                )
+                rhs_g = J.transpose(-1, -2) @ solve_g
 
-                schur_g = torch.eye(G.size(2), device=args.device).unsqueeze(
-                    0
-                ) - torch.bmm(G.transpose(1, 2), solve_g)
-                schur_a = torch.eye(G.size(1), device=args.device).unsqueeze(
-                    0
-                ) - torch.bmm(G, solve_a)
+                solve_g_loo = solve_g + torch.bmm(
+                    solve_j_g,
+                    torch.linalg.solve(schur_g, rhs_g),
+                )
 
-                print(torch.vmap(torch.det)(schur_a),torch.vmap(torch.det)(schur_g))
+                solve_j_a = torch.cholesky_solve(
+                    J.transpose(1, 2),
+                    cache[layer_id]["La"],
+                )
+
+                schur_a = torch.eye(
+                    J.size(1),
+                    dtype=J.dtype,
+                    device=J.device,
+                ).expand(J.size(0), -1, -1) - torch.bmm(
+                    J,
+                    solve_j_a,
+                )
+
+                solve_g_loo_a = torch.cholesky_solve(
+                    solve_g_loo.transpose(1, 2),
+                    cache[layer_id]["La"],
+                ).transpose(1, 2)
+
+                rhs_a = torch.bmm(
+                    solve_g_loo_a,
+                    J.transpose(1, 2),
+                )
+
+                solve_ga_loo = solve_g_loo_a + torch.bmm(
+                    torch.linalg.solve(schur_a, rhs_a.transpose(1, 2)).transpose(1, 2),
+                    solve_j_a.transpose(1, 2),
+                )
 
                 si_loo += torch.einsum(
                     "onp, Onp->noO",
-                    torch.linalg.solve(schur_a, solve_a.transpose(1, 2)).reshape(
-                        sG[0], sG[1], -1
+                    G.view(sG[0], sG[1], -1),
+                    solve_ga_loo.view(sG[0], sG[1], -1),
+                )
+            self_influence.append(si.detach().cpu())
+            self_influence_loo.append(si_loo.detach().cpu())
+    elif isinstance(F, PMatBlockDiag):
+        cache = {}
+
+        for layer_id, layer in tqdm(lc.layers.items()):
+            block = F.data[layer_id]
+
+            block_reg = block + args.regul * torch.eye(
+                block.shape[0], dtype=block.dtype, device=block.device
+            )
+
+            cache[layer_id] = torch.linalg.cholesky(block_reg)
+        for inputs, targets in tqdm(light_noisy_noaug):
+            si = 0
+            si_loo = 0
+            pfmap_func = Jacobian(
+                model,
+                (inputs, targets),
+                function=func,
+                layer_collection=lc,
+            )
+            pfmap_grad = Jacobian(
+                model,
+                (inputs, targets),
+                function=loss,
+                layer_collection=lc,
+            )
+            for layer_id, layer in lc.layers.items():
+                if layer.has_bias():
+                    Gw, Gb = pfmap_grad.to_torch_layer(layer_id)
+                else:
+                    Gw = pfmap_grad.to_torch_layer(layer_id)[0]
+                sG = Gw.size()
+                G = Gw.view(sG[0], sG[1], -1)
+                if layer.has_bias():
+                    G = torch.cat([G, Gb.view(sG[0], sG[1], -1)], dim=2)
+
+                if layer.has_bias():
+                    Jw, Jb = pfmap_func.to_torch_layer(layer_id)
+                else:
+                    Jw = pfmap_func.to_torch_layer(layer_id)[0]
+                sJ = Jw.size()
+                J = Jw.view(sJ[0], sJ[1], -1)
+                if layer.has_bias():
+                    J = torch.cat([J, Jb.view(sJ[0], sJ[1], -1)], dim=2)
+
+                si_layer = torch.einsum(
+                    "onp, Onp->noO",
+                    G,
+                    torch.cholesky_solve(G.transpose(1, 2), cache[layer_id]).transpose(
+                        1, 2
                     ),
-                    torch.linalg.solve(schur_g, solve_g.transpose(1, 2))
-                    .transpose(1, 2)
-                    .reshape(sG[0], sG[1], -1),
+                )
+                FinvJ = torch.cholesky_solve(
+                    J.transpose(1, 2), cache[layer_id]
+                ).transpose(1, 2)
+                leverage_layer = torch.einsum("onp, Onp->noO", J, FinvJ)
+                cross_layer = torch.einsum("onp, Onp->noO", G, FinvJ)
+                si += si_layer
+                si_loo += si_layer + cross_layer @ torch.linalg.solve(
+                    (
+                        torch.eye(leverage_layer.shape[-1], device=args.device)
+                        - leverage_layer
+                    ),
+                    cross_layer.transpose(1, 2),
                 )
 
             self_influence.append(si.detach().cpu())
             self_influence_loo.append(si_loo.detach().cpu())
     elif isinstance(F, PMatDense):
         for inputs, targets in tqdm(light_noisy_noaug):
-            pfmap = Jacobian(
+            pfmap_func = Jacobian(
                 model,
                 (inputs, targets),
                 function=func,
                 layer_collection=lc,
             )
-            si = (pfmap.to_torch() * F.solve(pfmap, regul=args.regul).to_torch()).sum(
-                dim=(0, 2)
+            pfmap_grad = Jacobian(
+                model,
+                (inputs, targets),
+                function=loss,
+                layer_collection=lc,
             )
-            si_loo = si / (1 - si)
-        self_influence.append(si)
-        self_influence_loo.append(si_loo)
+            si = torch.einsum(
+                "onp, Onp->noO",
+                pfmap_grad.to_torch(),
+                F.solve(pfmap_grad, regul=args.regul).to_torch(),
+            )
+            leverage = torch.einsum(
+                "onp, Onp->noO",
+                pfmap_func.to_torch(),
+                F.solve(pfmap_func, regul=args.regul).to_torch(),
+            )
+            cross = torch.einsum(
+                "onp, Onp->noO",
+                pfmap_grad.to_torch(),
+                F.solve(pfmap_func, regul=args.regul).to_torch(),
+            )
+            self_influence.append(si)
+            self_influence_loo.append(
+                si
+                + cross
+                @ torch.linalg.solve(
+                    (torch.eye(leverage.shape[-1], device=args.device) - leverage),
+                    cross.transpose(1, 2),
+                )
+            )
     # %%
     self_influence = torch.cat(self_influence)
     self_influence_loo = torch.cat(self_influence_loo)
@@ -445,11 +584,4 @@ plt.scatter(
 # %%
 plt.scatter(tr_self_influence, tr_self_influence_loo)
 plt.axline((0, 0), slope=1)
-# %%
-self_influence[0].diag()
-# %%
-noisy_train_set.tensors[1][0]
-# %%
-self_influence_loo[0].diag()
-
 # %%

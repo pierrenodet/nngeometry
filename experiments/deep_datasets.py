@@ -12,8 +12,8 @@ def mnist1d(root, train=True, transform=None):
     from mnist1d.data import get_dataset_args, make_dataset
 
     args = get_dataset_args()
-    args.num_samples = 1000
-    args.train_split = 0.8
+    args.num_samples = 5000
+    args.train_split = 0.2
     args.padding = [24, 40]
     args.max_translation = 34
     args.final_seq_length = 28
@@ -100,29 +100,37 @@ DATASETS = {
         #     nn.Flatten(),
         #     nn.Linear(c * 4, outputs),
         # ),
-        lambda outputs=10, c=64: nn.Sequential(
+        # partial(optim.AdamW, weight_decay=1e-2),
+        # partial(
+        #     torch.optim.SGD,
+        #     lr=1e-2,
+        #     momentum=0.9,
+        #     weight_decay=1e-2,
+        #     nesterov=True,
+        # ),
+        lambda outputs=10, c=64, h=4, d=2: nn.Sequential(
             nn.Linear(28, c),
-            Residuals(
-                nn.Sequential(
-                    nn.LayerNorm(c),
-                    nn.Linear(c, c * 4),
-                    nn.GELU(),
-                    nn.Linear(c * 4, c),
+            *[
+                Residuals(
+                    nn.Sequential(
+                        nn.LayerNorm(c),
+                        nn.Linear(c, c * h),
+                        nn.GELU(),
+                        nn.Linear(c * h, c),
+                    )
                 )
-            ),
-            Residuals(
-                nn.Sequential(
-                    nn.LayerNorm(c),
-                    nn.Linear(c, c * 4),
-                    nn.GELU(),
-                    nn.Linear(c * 4, c),
-                )
-            ),
+                for _ in range(d)
+            ],
             nn.LayerNorm(c),
             nn.Linear(c, outputs),
         ),
-        partial(optim.AdamW, weight_decay=1e-2),
-        # partial(optim.SGD, lr=1e-3, weight_decay=1e-2, momentum=0.9, nesterov=True),
+        partial(
+            torch.optim.SGD,
+            lr=1e-2,
+            momentum=0.9,
+            weight_decay=0.0,
+            nesterov=True,
+        ),
         list(map(str, range(10))),
     ),
     "mnist": Experiment(
