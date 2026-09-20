@@ -12,7 +12,7 @@ def mnist1d(root, train=True, transform=None):
     from mnist1d.data import get_dataset_args, make_dataset
 
     args = get_dataset_args()
-    args.num_samples = 5000
+    args.num_samples = 10000
     args.train_split = 0.2
     args.padding = [24, 40]
     args.max_translation = 34
@@ -108,8 +108,22 @@ DATASETS = {
         #     weight_decay=1e-2,
         #     nesterov=True,
         # ),
-        lambda outputs=10, c=64, h=4, d=2: nn.Sequential(
-            nn.Linear(28, c),
+        lambda outputs=10, c=64, h=4, d=2, k=9: nn.Sequential(
+            nn.Unflatten(-1, (1, -1)),
+            nn.Conv1d(1, c, kernel_size=9, padding=9 // 2),
+            nn.GELU(),
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(c, c),
+            # nn.Conv1d(1, c, kernel_size=k, padding=k // 2),
+            # nn.GELU(),
+            # nn.MaxPool1d(2),  # 28 -> 14, first bit of real invariance
+            # nn.Conv1d(c, c * 2, kernel_size=k, padding=k // 2),
+            # nn.GELU(),
+            # nn.AdaptiveAvgPool1d(1),  # global pool -> true shift invariance
+            # nn.Flatten(),
+            # nn.Linear(c * 2, c),
+            # nn.Linear(28, c),
             *[
                 Residuals(
                     nn.Sequential(

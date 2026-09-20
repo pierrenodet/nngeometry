@@ -92,7 +92,7 @@ torch.manual_seed(args.seed)
 transform, dataset, model_fn, optimizer_fn, classes = DATASETS[args.dataset]
 
 # model_fn = partial(model_fn, c=16)
-model_fn = partial(model_fn, h=4, d=1)
+model_fn = partial(model_fn, c=32, h=4, d=4)
 
 if transform is not None:
     if hasattr(transform, "transforms"):
@@ -201,6 +201,7 @@ for i in range(args.runs):
         repr = partial(PMatKFAC, strategy="one_iter_kpsvd")
         # repr = PMatKFAC
         # repr = PMatEKFAC
+        # repr = partial(PMatEKFAC, strategy="one_iter_kpsvd")
         lc = supported_kfac_layers(LayerCollection.from_model(model))
     elif "bd" in args.repr:
         repr = PMatBlockDiag
@@ -253,18 +254,24 @@ for i in range(args.runs):
     # %%
     avg_lam = F.trace() / F.layer_collection.numel()
     print(avg_lam)
-    args.regul = 1e1
-    light_noisy_noaug = DataLoader(noisy_train_set, batch_size=32)
+    args.regul = 1e-4
+    light_noisy_noaug = DataLoader(noisy_train_set, batch_size=15)
 
     self_influence = []
     self_influence_loo = []
-
+    leverages = []
+    leverages_loo = []
+    det_schurs = []
+    cooks = []
     if isinstance(F, PMatEKFAC):
         evecs, evals = F.data
 
         for inputs, targets in tqdm(light_noisy_noaug):
-            si = 0
-            si_loo = 0
+            si = []
+            si_loo = []
+            leverage = []
+            leverage_loo = []
+            cook = []
             pfmap_func = Jacobian(
                 model,
                 (inputs, targets),
@@ -304,16 +311,59 @@ for i in range(args.runs):
 
                 Gkfe_scaled = Gkfe / (evals[layer_id].view(1, 1, *sG[2:]) + args.regul)
 
-                si += torch.einsum("onij, Onij->noO", Gkfe_scaled, Gkfe)
+                si.append(torch.einsum("onij, Onij->noO", Gkfe_scaled, Gkfe))
 
-                Gkfe_loo_scaled = Gkfe / (
-                    (evals[layer_id].view(1, 1, *sG[2:]) + args.regul)
-                    - (Jkfe**2).sum(dim=0)
+                si_loo.append(
+                    torch.einsum(
+                        "onij, Onij->noO",
+                        Gkfe
+                        / (
+                            (evals[layer_id].view(1, 1, *sG[2:]) + args.regul)
+                            - (Jkfe**2).sum(dim=0)
+                        ),
+                        Gkfe,
+                    )
                 )
-                si_loo += torch.einsum("onij, Onij->noO", Gkfe_loo_scaled, Gkfe)
+                leverage.append(
+                    torch.einsum(
+                        "onij, Onij->noO",
+                        Jkfe / (evals[layer_id].view(1, 1, *sG[2:]) + args.regul),
+                        Jkfe,
+                    )
+                )
+                leverage_loo.append(
+                    torch.einsum(
+                        "onij, Onij->noO",
+                        Jkfe
+                        / (
+                            evals[layer_id].view(1, 1, *sG[2:])
+                            + args.regul
+                            - (Jkfe**2).sum(dim=0)
+                        ),
+                        Jkfe,
+                    )
+                )
+                cook.append(
+                    torch.einsum(
+                        "onij, Onij->noO",
+                        Gkfe
+                        * evals[layer_id].view(1, 1, *sG[2:])
+                        / (
+                            evals[layer_id].view(1, 1, *sG[2:])
+                            + args.regul
+                            - (Jkfe**2).sum(dim=0)
+                        )
+                        ** 2,
+                        Gkfe,
+                    )
+                )
 
-            self_influence.append(si.detach().cpu())
-            self_influence_loo.append(si_loo.detach().cpu())
+            self_influence.append(torch.stack(si, dim=0).detach().cpu())
+            self_influence_loo.append(torch.stack(si_loo, dim=0).detach().cpu())
+            leverages.append(torch.stack(leverage, dim=0).detach().cpu())
+            leverages_loo.append(torch.stack(leverage_loo, dim=0).detach().cpu())
+            cooks.append(torch.stack(cook, dim=0).detach().cpu())
+
     elif isinstance(F, PMatKFAC):
         cache = {}
 
@@ -335,9 +385,12 @@ for i in range(args.runs):
                 "Lg": torch.linalg.cholesky(g_reg),
             }
 
+            def solve(A, B):
+                return torch.cholesky_solve(B, A)
+
         for inputs, targets in tqdm(light_noisy_noaug):
-            si = 0
-            si_loo = 0
+            si = []
+            si_loo = []
             pfmap_func = Jacobian(
                 model,
                 (inputs, targets),
@@ -356,85 +409,236 @@ for i in range(args.runs):
                 else:
                     Gw = pfmap_grad.to_torch_layer(layer_id)[0]
                 sG = Gw.size()
-                bs = sG[0] * sG[1]
-                G = Gw.view(bs, sG[2], -1)
+                Gw = Gw.reshape(sG[0], sG[1], sG[2], -1)
                 if layer.has_bias():
-                    G = torch.cat([G, Gb.view(bs, -1, 1)], dim=2)
+                    G = torch.cat([Gw, Gb.unsqueeze(-1)], dim=-1)
 
                 if layer.has_bias():
                     Jw, Jb = pfmap_func.to_torch_layer(layer_id)
                 else:
                     Jw = pfmap_func.to_torch_layer(layer_id)[0]
                 sJ = Jw.size()
-                bs = sJ[0] * sJ[1]
-                J = Jw.view(bs, sJ[2], -1)
+                Jw = Jw.reshape(sJ[0], sJ[1], sJ[2], -1)
                 if layer.has_bias():
-                    J = torch.cat([J, Jb.view(bs, -1, 1)], dim=2)
+                    J = torch.cat([Jw, Jb.unsqueeze(-1)], dim=-1)
 
-                G = G.unsqueeze(0)
-                J = J.reshape(sJ[0], sJ[1], *J.shape[1:])
-
-                solve_g = torch.cholesky_solve(G, cache[layer_id]["Lg"])
-                solve_ga = torch.cholesky_solve(
-                    solve_g.transpose(-1, -2), cache[layer_id]["La"]
+                solve_g = solve(cache[layer_id]["Lg"], G)
+                solve_ga = solve(
+                    cache[layer_id]["La"], solve_g.transpose(-1, -2)
                 ).transpose(-1, -2)
-                si += torch.einsum(
-                    "onp, Onp->noO",
-                    G.view(sG[0], sG[1], -1),
-                    solve_ga.view(sG[0], sG[1], -1),
-                )
 
-                solve_j_g = torch.cholesky_solve(J, cache[layer_id]["Lg"])
-                schur_g = torch.eye(
-                    J.size(-1),
-                    dtype=J.dtype,
-                    device=J.device,
-                ).expand(J.size(0), J.size(1), -1, -1) - (
-                    J.transpose(-1, -2) @ solve_j_g
-                )
-                rhs_g = J.transpose(-1, -2) @ solve_g
+                si.append(torch.einsum("onij, Onij->noO", G, solve_ga))
 
-                solve_g_loo = solve_g + torch.bmm(
-                    solve_j_g,
-                    torch.linalg.solve(schur_g, rhs_g),
-                )
+                def woodbury_downdate_solve(F, G, J):
+                    FinvG = solve(F, G)
+                    FinvJ = solve(F, J)
+                    leverage = torch.einsum("onij, Onij -> noO", J, FinvJ)
+                    schur = (
+                        torch.eye(leverage.shape[-1], dtype=J.dtype, device=J.device)
+                        - leverage
+                    )
+                    check = torch.vmap(torch.linalg.det)(schur)
+                    print(check.min())
+                    cross = torch.einsum("onij, Onij->noO", J, FinvG)
+                    return FinvG + torch.einsum(
+                        "onij, noO-> Onij", FinvJ, torch.linalg.solve(schur, cross)
+                    )
 
-                solve_j_a = torch.cholesky_solve(
-                    J.transpose(1, 2),
+                tr_loo = torch.trace(
+                    torch.einsum("onij, onIj->iI", J, J) / (J.shape[1] ** 0.5)
+                )
+                print(tr_loo)
+                solve_g_loo = woodbury_downdate_solve(
+                    cache[layer_id]["Lg"],
+                    G,
+                    J / tr_loo**0.5,
+                )
+                solve_ga_loo = woodbury_downdate_solve(
                     cache[layer_id]["La"],
-                )
+                    solve_g_loo.transpose(-1, -2),
+                    J.transpose(-1, -2) / tr_loo**0.5,
+                ).transpose(-1, -2)
+                si_loo.append(torch.einsum("onij, Onij->noO", G, solve_ga_loo))
+                # U_g = J.permute(1, 2, 0, 3).reshape(
+                #     batch_size,
+                #     out_dim,
+                #     n_func_outputs * in_dim,
+                # )
+                # # U_g = U_g / torch.sqrt(torch.trace(F.data[layer_id][1]))
 
-                schur_a = torch.eye(
-                    J.size(1),
-                    dtype=J.dtype,
-                    device=J.device,
-                ).expand(J.size(0), -1, -1) - torch.bmm(
-                    J,
-                    solve_j_a,
-                )
+                # # The loss-output axis is not part of the downdate.
+                # # It consists of independent RHS columns.
+                # #
+                # # [loss_out, batch, out, in]
+                # #     -> [batch, out, loss_out * in]
+                # G_rhs = G.permute(1, 2, 0, 3).reshape(
+                #     batch_size,
+                #     out_dim,
+                #     n_loss_outputs * in_dim,
+                # )
 
-                solve_g_loo_a = torch.cholesky_solve(
-                    solve_g_loo.transpose(1, 2),
-                    cache[layer_id]["La"],
-                ).transpose(1, 2)
+                # # Applies (G_reg - U_g U_g^T)^(-1) to every loss-output / input RHS.
+                # Ginv_G_rhs = woodbury_downdate_solve(
+                #     G_rhs,
+                #     cache[layer_id]["Lg"],
+                #     U_g,
+                # )
 
-                rhs_a = torch.bmm(
-                    solve_g_loo_a,
-                    J.transpose(1, 2),
-                )
+                # # Back to [loss_out, batch, out, in].
+                # Ginv_G = Ginv_G_rhs.reshape(
+                #     batch_size,
+                #     out_dim,
+                #     n_loss_outputs,
+                #     in_dim,
+                # ).permute(2, 0, 1, 3)
 
-                solve_ga_loo = solve_g_loo_a + torch.bmm(
-                    torch.linalg.solve(schur_a, rhs_a.transpose(1, 2)).transpose(1, 2),
-                    solve_j_a.transpose(1, 2),
-                )
+                # # ------------------------------------------------------------------
+                # # A factor downdate
+                # #
+                # # delta_a[n] = sum_q J[q, n].T @ J[q, n]
+                # #
+                # # U_a[n, in, (q, out)] = J[q, n, out, in] / sqrt(trace(a)).
+                # # ------------------------------------------------------------------
+                # U_a = J.permute(1, 3, 0, 2).reshape(
+                #     batch_size,
+                #     in_dim,
+                #     n_func_outputs * out_dim,
+                # )
+                # # U_a = U_a/ torch.sqrt(torch.trace(F.data[layer_id][0]))
 
-                si_loo += torch.einsum(
-                    "onp, Onp->noO",
-                    G.view(sG[0], sG[1], -1),
-                    solve_ga_loo.view(sG[0], sG[1], -1),
-                )
-            self_influence.append(si.detach().cpu())
-            self_influence_loo.append(si_loo.detach().cpu())
+                # # To right-solve by A^{-1}, transpose the matrix representation:
+                # #
+                # # G^{-1} gradient:
+                # # [loss_out, batch, out, in]
+                # #
+                # # RHS for A:
+                # # [batch, in, loss_out * out]
+                # A_rhs = Ginv_G.permute(1, 3, 0, 2).reshape(
+                #     batch_size,
+                #     in_dim,
+                #     n_loss_outputs * out_dim,
+                # )
+
+                # Ainv_A_rhs = woodbury_downdate_solve(
+                #     A_rhs,
+                #     cache[layer_id]["La"],
+                #     U_a,
+                # )
+
+                # # Convert back to [loss_out, batch, out, in].
+                # FinvG_loo = Ainv_A_rhs.reshape(
+                #     batch_size,
+                #     in_dim,
+                #     n_loss_outputs,
+                #     out_dim,
+                # ).permute(2, 0, 3, 1)
+                # si_loo.append(
+                #     torch.einsum(
+                #         "onp,Onp->noO",
+                #         G.view(n_loss_outputs, batch_size, -1),
+                #         FinvG_loo.view(n_loss_outputs, batch_size, -1),
+                #     )
+                # )
+                # def woodbury_downdate_solve(G, chol, U):
+                #     FinvG = torch.cholesky_solve(G, chol)
+                #     FinvU = torch.cholesky_solve(U, chol)
+                #     schur = torch.eye(U.shape[-1], device=args.device) - (
+                #         U.transpose(-1, -2) @ FinvU
+                #     )
+                #     cross = U.transpose(-1, -2) @ FinvG
+                #     return FinvG + FinvU @ torch.linalg.solve(schur, cross)
+
+                # solve_g = torch.cholesky_solve(G, cache[layer_id]["Lg"])
+                # solve_ga = torch.cholesky_solve(
+                #     solve_g.transpose(-1, -2),
+                #     cache[layer_id]["La"],
+                # ).transpose(-1, -2)
+
+                # si += torch.einsum(
+                #     "onp, Onp->noO",
+                #     G.view(sG[0], sG[1], -1),
+                #     solve_ga.view(sG[0], sG[1], -1),
+                # )
+
+                # U_g = J.permute(1, 2, 0, 3).reshape(
+                #     batch_size,
+                #     out_dim,
+                #     n_func_outputs * in_dim,
+                # ) / torch.sqrt(torch.trace(g))
+
+                # # The loss-output axis is not part of the downdate.
+                # # It consists of independent RHS columns.
+                # #
+                # # [loss_out, batch, out, in]
+                # #     -> [batch, out, loss_out * in]
+                # G_rhs = G.permute(1, 2, 0, 3).reshape(
+                #     batch_size,
+                #     out_dim,
+                #     1 * in_dim,
+                # )
+
+                # # Applies (G_reg - U_g U_g^T)^(-1) to every loss-output / input RHS.
+                # Ginv_G_rhs = woodbury_downdate_solve(
+                #     G_rhs,
+                #     cache[layer_id]["Lg"],
+                #     U_g,
+                # )
+
+                # # Back to [loss_out, batch, out, in].
+                # Ginv_G = Ginv_G_rhs.reshape(
+                #     batch_size,
+                #     out_dim,
+                #     1,
+                #     in_dim,
+                # ).permute(2, 0, 1, 3)
+
+                # # ------------------------------------------------------------------
+                # # A factor downdate
+                # #
+                # # delta_a[n] = sum_q J[q, n].T @ J[q, n]
+                # #
+                # # U_a[n, in, (q, out)] = J[q, n, out, in] / sqrt(trace(a)).
+                # # ------------------------------------------------------------------
+                # U_a = J.permute(1, 3, 0, 2).reshape(
+                #     batch_size,
+                #     in_dim,
+                #     n_func_outputs * out_dim,
+                # ) / torch.sqrt(torch.trace(a))
+
+                # # To right-solve by A^{-1}, transpose the matrix representation:
+                # #
+                # # G^{-1} gradient:
+                # # [loss_out, batch, out, in]
+                # #
+                # # RHS for A:
+                # # [batch, in, loss_out * out]
+                # A_rhs = Ginv_G.permute(1, 3, 0, 2).reshape(
+                #     batch_size,
+                #     in_dim,
+                #     1 * out_dim,
+                # )
+
+                # Ainv_A_rhs = woodbury_downdate_solve(
+                #     A_rhs,
+                #     cache[layer_id]["La"],
+                #     U_a,
+                # )
+
+                # # Convert back to [loss_out, batch, out, in].
+                # FinvG_loo = Ainv_A_rhs.reshape(
+                #     batch_size,
+                #     in_dim,
+                #     1,
+                #     out_dim,
+                # ).permute(2, 0, 3, 1)
+                # si_loo += torch.einsum(
+                #     "onp,Onp->noO",
+                #     G.view(1, batch_size, -1),
+                #     FinvG_loo.view(1, batch_size, -1),
+                # )
+
+            self_influence.append(torch.stack(si, dim=0).detach().cpu())
+            self_influence_loo.append(torch.stack(si_loo, dim=0).detach().cpu())
     elif isinstance(F, PMatBlockDiag):
         cache = {}
 
@@ -446,15 +650,32 @@ for i in range(args.runs):
             )
 
             cache[layer_id] = torch.linalg.cholesky(block_reg)
+
+            def solve(A, B):
+                return torch.cholesky_solve(B, A)
+
+            # cache[layer_id] = torch.linalg.qr(block_reg)
+
+            # def solve(A, B):
+            #     Q, R = A
+            #     return torch.linalg.solve_triangular(
+            #         R, Q.transpose(-2, -1) @ B, upper=True
+            #     )
+
         for inputs, targets in tqdm(light_noisy_noaug):
-            si = 0
-            si_loo = 0
+            si = []
+            si_loo = []
             pfmap_func = Jacobian(
                 model,
                 (inputs, targets),
                 function=func,
                 layer_collection=lc,
             )
+            leverage = []
+            leverage_loo = []
+            det_schur = []
+            cook = []
+            neff = []
             pfmap_grad = Jacobian(
                 model,
                 (inputs, targets),
@@ -480,29 +701,44 @@ for i in range(args.runs):
                 if layer.has_bias():
                     J = torch.cat([J, Jb.view(sJ[0], sJ[1], -1)], dim=2)
 
-                si_layer = torch.einsum(
-                    "onp, Onp->noO",
+                G = G.permute(1, 0, 2)
+                J = J.permute(1, 0, 2)
+
+                block_si = torch.einsum(
+                    "nop, nOp->noO",
                     G,
-                    torch.cholesky_solve(G.transpose(1, 2), cache[layer_id]).transpose(
-                        1, 2
-                    ),
+                    solve(cache[layer_id], G.transpose(1, 2)).transpose(1, 2),
                 )
-                FinvJ = torch.cholesky_solve(
-                    J.transpose(1, 2), cache[layer_id]
-                ).transpose(1, 2)
-                leverage_layer = torch.einsum("onp, Onp->noO", J, FinvJ)
-                cross_layer = torch.einsum("onp, Onp->noO", G, FinvJ)
-                si += si_layer
-                si_loo += si_layer + cross_layer @ torch.linalg.solve(
-                    (
-                        torch.eye(leverage_layer.shape[-1], device=args.device)
-                        - leverage_layer
-                    ),
-                    cross_layer.transpose(1, 2),
+                block_FinvJ = solve(cache[layer_id], J.transpose(1, 2)).transpose(1, 2)
+                block_leverage = torch.einsum("nop, nOp->noO", J, block_FinvJ)
+                block_cross = torch.einsum("nop, nOp->noO", G, block_FinvJ)
+                block_schur = (
+                    torch.eye(block_leverage.shape[-1], device=args.device)
+                    - block_leverage
+                )
+                si.append(block_si)
+                loo_effect = torch.linalg.solve(
+                    block_schur, block_cross.transpose(1, 2)
+                )
+                si_loo.append(block_si + block_cross @ loo_effect)
+                leverage.append(block_leverage)
+                leverage_loo.append(
+                    torch.linalg.solve(block_schur, block_leverage.transpose(1, 2))
+                )
+                det_schur.append(torch.logdet(block_schur))
+                cook.append(
+                    block_si
+                    + block_cross @ loo_effect
+                    + loo_effect.transpose(1, 2) @ loo_effect
                 )
 
-            self_influence.append(si.detach().cpu())
-            self_influence_loo.append(si_loo.detach().cpu())
+            leverages.append(torch.stack(leverage, dim=0).detach().cpu())
+            leverages_loo.append(torch.stack(leverage_loo, dim=0).detach().cpu())
+            self_influence.append(torch.stack(si, dim=0).detach().cpu())
+            self_influence_loo.append(torch.stack(si_loo, dim=0).detach().cpu())
+            det_schurs.append(torch.stack(det_schur, dim=0).detach().cpu())
+            cooks.append(torch.stack(cook, dim=0).detach().cpu())
+
     elif isinstance(F, PMatDense):
         for inputs, targets in tqdm(light_noisy_noaug):
             pfmap_func = Jacobian(
@@ -522,52 +758,136 @@ for i in range(args.runs):
                 pfmap_grad.to_torch(),
                 F.solve(pfmap_grad, regul=args.regul).to_torch(),
             )
+            FinvJ = F.solve(pfmap_func, regul=args.regul).to_torch()
             leverage = torch.einsum(
                 "onp, Onp->noO",
                 pfmap_func.to_torch(),
-                F.solve(pfmap_func, regul=args.regul).to_torch(),
+                FinvJ,
             )
             cross = torch.einsum(
                 "onp, Onp->noO",
                 pfmap_grad.to_torch(),
-                F.solve(pfmap_func, regul=args.regul).to_torch(),
+                FinvJ,
             )
             self_influence.append(si)
-            self_influence_loo.append(
-                si
-                + cross
-                @ torch.linalg.solve(
-                    (torch.eye(leverage.shape[-1], device=args.device) - leverage),
-                    cross.transpose(1, 2),
-                )
+            schur = torch.eye(leverage.shape[-1], device=args.device) - leverage
+            loo_effect = torch.linalg.solve(schur, cross.transpose(1, 2))
+            self_influence_loo.append(si + cross @ loo_effect)
+            leverages.append(leverage)
+            leverages_loo.append(torch.linalg.solve(schur, leverage.transpose(1, 2)))
+            det_schurs.append(torch.logdet(schur))
+            cooks.append(
+                si + block_cross @ loo_effect + loo_effect.transpose(1, 2) @ loo_effect
             )
     # %%
-    self_influence = torch.cat(self_influence)
-    self_influence_loo = torch.cat(self_influence_loo)
+    self_influence = torch.cat(self_influence, dim=1)
+    self_influence_loo = torch.cat(self_influence_loo, dim=1)
+    # leverages = torch.cat(leverages, dim=1)
+    # leverages_loo = torch.cat(leverages_loo, dim=1)
+    # cooks = torch.cat(cooks, dim=1)
+    # det_schurs = torch.cat(det_schurs, dim=1)
 
     # %%
-    loss = []
+    losses = []
     for inputs, targets in tqdm(light_noisy_noaug):
         with torch.no_grad():
-            loss.append(tF.cross_entropy(model(inputs), targets, reduction="none"))
-    loss = torch.cat(loss)
-
+            losses.append(tF.cross_entropy(model(inputs), targets, reduction="none"))
+    losses = torch.cat(losses)
     # %%
-    tr_self_influence = torch.vmap(torch.trace)(self_influence)
-    tr_self_influence_loo = torch.vmap(torch.trace)(self_influence_loo)
 
-    # %%
+    tr_self_influence = torch.vmap(torch.vmap(torch.trace))(self_influence)
+    tr_self_influence_loo = torch.vmap(torch.vmap(torch.trace))(self_influence_loo)
+    tr_leverages = torch.vmap(torch.vmap(torch.trace))(leverages)
+    tr_leverages_loo = torch.vmap(torch.vmap(torch.trace))(leverages_loo)
+    tr_cooks = torch.vmap(torch.vmap(torch.trace))(cooks)
+
+    n_blocks = len(lc.layers)
+
+    for name, scores in [
+        ("self-influence", tr_self_influence),
+        ("LOO self-influence (or cook bar)", tr_self_influence_loo),
+        ("leverage", tr_leverages),
+        ("LOO leverage", tr_leverages_loo),
+        # ("det schur", -det_schurs),
+        ("cook", tr_cooks),
+    ]:
+        plt.plot(
+            [
+                roc_auc_score(noisy_examples, scores[i].numpy(force=True))
+                for i in range(n_blocks)
+            ],
+            label=name,
+        )
+    plt.axhline(
+        roc_auc_score(noisy_examples, losses.numpy(force=True)), label="per-sample loss"
+    )
+    plt.ylim((0.5, 1))
+    plt.legend()
+    plt.show()
+
     print(
-        roc_auc_score(noisy_examples, tr_self_influence.numpy(force=True)),
-        roc_auc_score(noisy_examples, tr_self_influence_loo.numpy(force=True)),
-        roc_auc_score(noisy_examples, loss.numpy(force=True)),
+        roc_auc_score(noisy_examples, losses.numpy(force=True)),
+        roc_auc_score(noisy_examples, tr_self_influence.sum(dim=0).numpy(force=True)),
+        roc_auc_score(
+            noisy_examples, tr_self_influence_loo.sum(dim=0).numpy(force=True)
+        ),
+        roc_auc_score(noisy_examples, tr_leverages.sum(dim=0).numpy(force=True)),
+        roc_auc_score(noisy_examples, tr_leverages_loo.sum(dim=0).numpy(force=True)),
+        # roc_auc_score(noisy_examples, -det_schurs.sum(dim=0).numpy(force=True)),
+        roc_auc_score(noisy_examples, tr_cooks.sum(dim=0).numpy(force=True)),
+        roc_auc_score(
+            noisy_examples,
+            (tr_self_influence_loo + tr_cooks).sum(dim=0).numpy(force=True),
+        ),
+    )
+    print(
+        roc_auc_score(noisy_examples, losses.numpy(force=True)),
+        roc_auc_score(noisy_examples, tr_self_influence[-1].numpy(force=True)),
+        roc_auc_score(noisy_examples, tr_self_influence_loo[-1].numpy(force=True)),
+        roc_auc_score(noisy_examples, tr_leverages[-1].numpy(force=True)),
+        roc_auc_score(noisy_examples, tr_leverages_loo[-1].numpy(force=True)),
+        # roc_auc_score(noisy_examples, -det_schurs[-1].numpy(force=True)),
+        roc_auc_score(noisy_examples, tr_cooks[-1].numpy(force=True)),
+        roc_auc_score(
+            noisy_examples, (tr_self_influence_loo + tr_cooks)[-1].numpy(force=True)
+        ),
     )
     # %%
+    plt.plot(
+        [
+            kendalltau(
+                tr_self_influence[i].numpy(force=True),
+                tr_self_influence_loo[i].numpy(force=True),
+            ).statistic
+            for i in range(n_blocks)
+        ],
+        label=name,
+    )
+    plt.show()
     print(
         kendalltau(
-            tr_self_influence.numpy(force=True), tr_self_influence_loo.numpy(force=True)
+            tr_self_influence.sum(dim=0).numpy(force=True),
+            tr_self_influence_loo.sum(dim=0).numpy(force=True),
         ).statistic
     )
+    # %%
+    plt.plot(
+        [
+            kendalltau(
+                tr_leverages[i].numpy(force=True),
+                tr_leverages_loo[i].numpy(force=True),
+            ).statistic
+            for i in range(n_blocks)
+        ],
+        label=name,
+    )
+    print(
+        kendalltau(
+            tr_leverages.sum(dim=0).numpy(force=True),
+            tr_leverages_loo.sum(dim=0).numpy(force=True),
+        ).statistic
+    )
+    plt.show()
 
 
 # %%
@@ -575,13 +895,22 @@ for i in range(args.runs):
 import matplotlib.pyplot as plt
 
 plt.scatter(
-    torch.argsort(torch.argsort(tr_self_influence_loo)),
-    torch.argsort(torch.argsort(tr_self_influence)),
+    torch.argsort(torch.argsort(tr_self_influence_loo.sum(dim=0))),
+    torch.argsort(torch.argsort(tr_self_influence.sum(dim=0))),
     s=1,
     # c=noisy_train_set.tensors[1]
     c=noisy_examples,
 )
+plt.show()
+
 # %%
-plt.scatter(tr_self_influence, tr_self_influence_loo)
+plt.scatter(tr_self_influence.sum(dim=0), tr_self_influence_loo.sum(dim=0))
 plt.axline((0, 0), slope=1)
+plt.show()
+
+# for i in range(self_influence.shape[0]):
+#     plt.scatter(tr_self_influence[i], tr_self_influence_loo[i])
+#     plt.axline((0, 0), slope=1)
+#     plt.show()
+
 # %%
