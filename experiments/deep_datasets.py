@@ -13,7 +13,7 @@ def mnist1d(root, train=True, transform=None):
 
     args = get_dataset_args()
     args.num_samples = 10000
-    args.train_split = 0.2
+    args.train_split = 0.1
     args.padding = [24, 40]
     args.max_translation = 34
     args.final_seq_length = 28
