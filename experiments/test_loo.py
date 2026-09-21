@@ -21,7 +21,6 @@
 # %%
 import argparse
 import os
-import random
 import sys
 from copy import deepcopy
 from functools import partial
@@ -192,7 +191,6 @@ for i in range(args.runs):
     print(record)
     records.append(record)
     N = noisy_examples.shape[0]
-    index_loo = random.randint(0, N)
     # %%
     args.repr = "F_kfac"
     if "last" in args.repr:
@@ -238,40 +236,44 @@ for i in range(args.runs):
             a, g = F.data[layer_id]
             a *= N**0.5
             g *= N**0.5
-    noisy_train_loo = DataLoader(
-        subset(noisy_train_set, torch.argwhere(torch.arange(N) != index_loo).squeeze()),
-        batch_size=128,
-        shuffle=True,
-    )
+    n_loo = 4 if isinstance(F, PMatKFAC) else 1
+    indices_loo = torch.randperm(N)[:n_loo]
     noisy_train_removed = DataLoader(
-        subset(
-            noisy_train_set, torch.argwhere(torch.arange(N) == index_loo).squeeze(0)
-        ),
+        subset(noisy_train_set, indices_loo),
         batch_size=128,
-        shuffle=True,
+        shuffle=False,
     )
 
-    F_loo = FIM(
-        model,
-        noisy_train_loo,
-        repr,
-        "classif_logits",
-        device=args.device,
-        layer_collection=lc,
-        verbose=True,
-    )
-
-    if hasattr(F_loo, "update_diag"):
-        F_loo.update_diag(noisy_train)
-
-    N = noisy_examples.shape[0] - 1
-    if hasattr(F_loo, "__rmul__"):
-        F_loo = N * F_loo
-    else:  # kfac
-        for layer_id, layer in tqdm(lc.layers.items()):
-            a, g = F_loo.data[layer_id]
-            a *= N**0.5
-            g *= N**0.5
+    F_loos = []
+    for index_loo in indices_loo:
+        noisy_train_loo = DataLoader(
+            subset(
+                noisy_train_set,
+                torch.argwhere(torch.arange(N) != index_loo).squeeze(),
+            ),
+            batch_size=128,
+            shuffle=True,
+        )
+        F_loo = FIM(
+            model,
+            noisy_train_loo,
+            repr,
+            "classif_logits",
+            device=args.device,
+            layer_collection=lc,
+            verbose=True,
+        )
+        if hasattr(F_loo, "update_diag"):
+            F_loo.update_diag(noisy_train)
+        if hasattr(F_loo, "__rmul__"):
+            F_loo = (N - 1) * F_loo
+        else:  # kfac
+            for layer_id, layer in tqdm(lc.layers.items()):
+                a, g = F_loo.data[layer_id]
+                a *= (N - 1) ** 0.5
+                g *= (N - 1) ** 0.5
+        F_loos.append(F_loo)
+    F_loo = F_loos[0]
     # %%
     args.regul = 1e0
     if isinstance(F, PMatKFAC):
@@ -283,7 +285,14 @@ for i in range(args.runs):
             shape = B.shape
             B = B.movedim(-2, 0).reshape(shape[-2], -1)
             B = evecs.mT @ B
-            B /= scale * evals[:, None] + args.regul**0.5
+            B = B.reshape(shape[-2], *shape[:-2], shape[-1]).movedim(0, -2)
+            scale = torch.as_tensor(scale, dtype=B.dtype, device=B.device)
+            scale = scale.reshape(
+                *scale.shape, *((1,) * (B.ndim - scale.ndim))
+            )
+            evals = evals.reshape(*((1,) * (B.ndim - 2)), -1, 1)
+            B /= scale * evals + args.regul**0.5
+            B = B.movedim(-2, 0).reshape(shape[-2], -1)
             B = evecs @ B
             return B.reshape(shape[-2], *shape[:-2], shape[-1]).movedim(0, -2)
 
@@ -291,16 +300,17 @@ for i in range(args.runs):
             FinvG = solve(A, B)
             FinvJ = solve(A, U)
             leverage = U.mT @ FinvJ
-            cross = U.mT @ FinvG.movedim(-2, 0).reshape(B.shape[-2], -1)
+            FinvG_matrix = FinvG.movedim(-2, 1).flatten(2)
+            cross = U.mT @ FinvG_matrix
             schur = torch.eye(
-                leverage.shape[0],
+                leverage.shape[-1],
                 dtype=leverage.dtype,
                 device=leverage.device,
             ) - leverage
             effect = torch.linalg.solve(schur, cross)
             correction = (FinvJ @ effect).reshape(
-                B.shape[-2], *B.shape[:-2], B.shape[-1]
-            ).movedim(0, -2)
+                B.shape[0], B.shape[-2], *B.shape[1:-2], B.shape[-1]
+            ).movedim(1, -2)
             return FinvG + correction
 
         for layer_id, layer in tqdm(lc.layers.items()):
@@ -316,13 +326,17 @@ for i in range(args.runs):
                 "trace": trace,
             }
 
-            a, g = F_loo.data[layer_id]
-            if layer.transposed:
-                a, g = g, a
-            cache_loo[layer_id] = {
-                "eig_a": torch.linalg.eigh(a),
-                "eig_g": torch.linalg.eigh(g),
-            }
+            cache_loo[layer_id] = []
+            for F_loo in F_loos:
+                a, g = F_loo.data[layer_id]
+                if layer.transposed:
+                    a, g = g, a
+                cache_loo[layer_id].append(
+                    {
+                        "eig_a": torch.linalg.eigh(a),
+                        "eig_g": torch.linalg.eigh(g),
+                    }
+                )
 
         for inputs, targets in tqdm(noisy_train_removed):
             pfmap_func = Jacobian(
@@ -363,16 +377,19 @@ for i in range(args.runs):
                 si = torch.einsum("onij, Onij->noO", G, solve_ga)
 
                 trace = cache[layer_id]["trace"]
-                trace_loo = torch.sqrt(trace**2 - (J**2).sum())
-                a_update_root = J.reshape(-1, J.shape[-1]).mT * trace_loo.rsqrt()
+                trace_loo = torch.sqrt(trace**2 - J.square().sum(dim=(0, 2, 3)))
+                a_update_root = J.permute(1, 3, 0, 2).reshape(
+                    J.shape[1], J.shape[3], -1
+                ) * trace_loo[:, None, None].rsqrt()
                 g_update_root = (
-                    J.permute(2, 0, 1, 3).reshape(J.shape[2], -1)
-                    * trace_loo.rsqrt()
+                    J.permute(1, 2, 0, 3).reshape(J.shape[1], J.shape[2], -1)
+                    * trace_loo[:, None, None].rsqrt()
                 )
+                G_loo = G.permute(1, 0, 2, 3)
                 solve_g_loo = woodbury_downdate_solve(
                     partial(solve, scale=trace / trace_loo),
                     cache[layer_id]["eig_g"],
-                    G,
+                    G_loo,
                     g_update_root,
                 )
                 solve_ga_loo = woodbury_downdate_solve(
@@ -381,14 +398,20 @@ for i in range(args.runs):
                     solve_g_loo.transpose(-1, -2),
                     a_update_root,
                 ).transpose(-1, -2)
-                si_loo = torch.einsum("onij, Onij->noO", G, solve_ga_loo)
+                si_loo = torch.einsum("boij,bOij->boO", G_loo, solve_ga_loo)
 
-                solve_g_loo_true = solve(cache_loo[layer_id]["eig_g"], G)
-                solve_ga_loo_true = solve(
-                    cache_loo[layer_id]["eig_a"],
-                    solve_g_loo_true.transpose(-1, -2),
-                ).transpose(-1, -2)
-                si_loo_true = torch.einsum("onij, Onij->noO", G, solve_ga_loo_true)
+                si_loo_true = []
+                for loo_index, loo_cache in enumerate(cache_loo[layer_id]):
+                    G_i = G[:, loo_index : loo_index + 1]
+                    solve_g_loo_true = solve(loo_cache["eig_g"], G_i)
+                    solve_ga_loo_true = solve(
+                        loo_cache["eig_a"],
+                        solve_g_loo_true.transpose(-1, -2),
+                    ).transpose(-1, -2)
+                    si_loo_true.append(
+                        torch.einsum("onij, Onij->noO", G_i, solve_ga_loo_true)
+                    )
+                si_loo_true = torch.cat(si_loo_true)
 
                 print(
                     si.squeeze(),
