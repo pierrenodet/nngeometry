@@ -81,7 +81,7 @@ args.competitors = True
 args.seed = 1337
 args.ft = False
 args.output_dir = "mislabeled-output"
-args.device = "cuda"
+args.device = "mps"
 
 
 os.makedirs(args.output_dir, exist_ok=True)
@@ -280,25 +280,28 @@ for i in range(args.runs):
 
         def solve(A, B, scale=1.0):
             evals, evecs = A
-            projected = torch.einsum("de,ondk->onek", evecs, B)
-            projected /= scale * evals[None, None, :, None] + args.regul**0.5
-            return torch.einsum("de,onek->ondk", evecs, projected)
+            shape = B.shape
+            B = B.movedim(-2, 0).reshape(shape[-2], -1)
+            B = evecs.mT @ B
+            B /= scale * evals[:, None] + args.regul**0.5
+            B = evecs @ B
+            return B.reshape(shape[-2], *shape[:-2], shape[-1]).movedim(0, -2)
 
         def woodbury_downdate_solve(solve, A, B, U):
             FinvG = solve(A, B)
             FinvJ = solve(A, U)
-            leverage = torch.einsum("onij, Onij->noO", U, FinvJ)
-            cross = torch.einsum("onij, Onij->noO", U, FinvG)
-            schur = (
-                torch.eye(
-                    leverage.shape[-1],
-                    dtype=leverage.dtype,
-                    device=leverage.device,
-                )[None, ...]
-                - leverage
-            )
+            leverage = U.mT @ FinvJ
+            cross = U.mT @ FinvG.movedim(-2, 0).reshape(B.shape[-2], -1)
+            schur = torch.eye(
+                leverage.shape[0],
+                dtype=leverage.dtype,
+                device=leverage.device,
+            ) - leverage
             effect = torch.linalg.solve(schur, cross)
-            return FinvG + torch.einsum("onij,noO->Onij", FinvJ, effect)
+            correction = (FinvJ @ effect).reshape(
+                B.shape[-2], *B.shape[:-2], B.shape[-1]
+            ).movedim(0, -2)
+            return FinvG + correction
 
         for layer_id, layer in tqdm(lc.layers.items()):
             a, g = F.data[layer_id]
@@ -360,21 +363,23 @@ for i in range(args.runs):
                 si = torch.einsum("onij, Onij->noO", G, solve_ga)
 
                 trace = cache[layer_id]["trace"]
-                trace_loo = torch.sqrt(
-                    cache[layer_id]["trace"] ** 2
-                    - (J**2).sum(dim=(0, 2, 3), keepdim=True)
+                trace_loo = torch.sqrt(trace**2 - (J**2).sum())
+                a_update_root = J.reshape(-1, J.shape[-1]).mT * trace_loo.rsqrt()
+                g_update_root = (
+                    J.permute(2, 0, 1, 3).reshape(J.shape[2], -1)
+                    * trace_loo.rsqrt()
                 )
                 solve_g_loo = woodbury_downdate_solve(
                     partial(solve, scale=trace / trace_loo),
                     cache[layer_id]["eig_g"],
                     G,
-                    J * trace_loo.rsqrt(),
+                    g_update_root,
                 )
                 solve_ga_loo = woodbury_downdate_solve(
                     partial(solve, scale=trace / trace_loo),
                     cache[layer_id]["eig_a"],
                     solve_g_loo.transpose(-1, -2),
-                    J.transpose(-1, -2) * trace_loo.rsqrt(),
+                    a_update_root,
                 ).transpose(-1, -2)
                 si_loo = torch.einsum("onij, Onij->noO", G, solve_ga_loo)
 
