@@ -1,6 +1,6 @@
 # /// script
 # dependencies = [
-#  "deepgnostics",
+#  "nngeometry",
 #  "seaborn",
 #  "scipy",
 #  "pandas",
@@ -10,7 +10,7 @@
 #  "mnist1d",
 # ]
 # [tool.uv.sources]
-# deepgnostics = { path = "../.." , editable = true}
+# nngeometry = { path = "..", editable = true }
 # ///
 
 
@@ -26,7 +26,6 @@ import sys
 from copy import deepcopy
 from functools import partial
 
-import pandas as pd
 import requests
 import torch
 import torch.nn.functional as tF
@@ -82,7 +81,7 @@ args.competitors = True
 args.seed = 1337
 args.ft = False
 args.output_dir = "mislabeled-output"
-args.device = "cuda:0"
+args.device = "mps"
 
 
 os.makedirs(args.output_dir, exist_ok=True)
@@ -279,22 +278,43 @@ for i in range(args.runs):
         cache = {}
         cache_loo = {}
 
+        def eigensolve(eigh, rhs, scale=1.0):
+            eigenvalues, eigenvectors = eigh
+            projected = torch.einsum("de,ondk->onek", eigenvectors, rhs)
+            projected /= (
+                scale * eigenvalues[None, None, :, None] + args.regul**0.5
+            )
+            return torch.einsum("de,onek->ondk", eigenvectors, projected)
+
+        def woodbury_downdate_solve(eigh, rhs, update_root, scale):
+            Finv_rhs = eigensolve(eigh, rhs, scale)
+            Finv_update = eigensolve(
+                eigh, update_root[None, None], scale
+            ).squeeze(0, 1)
+            leverage = update_root.mT @ Finv_update
+            cross = torch.einsum("dr,ondk->ronk", update_root, Finv_rhs)
+            schur = (
+                torch.eye(
+                    leverage.shape[0],
+                    dtype=leverage.dtype,
+                    device=leverage.device,
+                )
+                - leverage
+            )
+            effect = torch.linalg.solve(schur, cross.flatten(1)).view_as(cross)
+            return Finv_rhs + torch.einsum("dr,ronk->ondk", Finv_update, effect)
+
         for layer_id, layer in tqdm(lc.layers.items()):
             a, g = F.data[layer_id]
+            normalization_trace = torch.trace(g)
 
             if layer.transposed:
                 a, g = g, a
 
-            a_reg = a + args.regul**0.5 * torch.eye(
-                a.shape[0], dtype=a.dtype, device=a.device
-            )
-            g_reg = g + args.regul**0.5 * torch.eye(
-                g.shape[0], dtype=g.dtype, device=g.device
-            )
-
             cache[layer_id] = {
-                "La": torch.linalg.cholesky(a_reg),
-                "Lg": torch.linalg.cholesky(g_reg),
+                "a_eigh": torch.linalg.eigh(a),
+                "g_eigh": torch.linalg.eigh(g),
+                "normalization_trace": normalization_trace,
             }
 
             def solve(A, B):
@@ -349,105 +369,51 @@ for i in range(args.runs):
                 if layer.has_bias():
                     J = torch.cat([Jw, Jb.unsqueeze(-1)], dim=-1)
 
-                solve_g = solve(cache[layer_id]["Lg"], G)
-                solve_ga = solve(
-                    cache[layer_id]["La"], solve_g.transpose(-1, -2)
+                solve_g = eigensolve(cache[layer_id]["g_eigh"], G)
+                solve_ga = eigensolve(
+                    cache[layer_id]["a_eigh"], solve_g.transpose(-1, -2)
                 ).transpose(-1, -2)
                 si = torch.einsum("onij, Onij->noO", G, solve_ga)
 
-                # def woodbury_downdate_solve(F, G, J):
-                #     FinvG = solve(F, G)
-                #     FinvJ = solve(F, J)
-                #     leverage = torch.einsum("onij, Onij -> noO", J, FinvJ)
-                #     schur = (
-                #         torch.eye(leverage.shape[-1], dtype=J.dtype, device=J.device)
-                #         - leverage
-                #     )
-                #     cross = torch.einsum("onij, Onij->noO", J, FinvG)
-                #     return FinvG + torch.einsum(
-                #         "onij, noO-> Onij", FinvJ, torch.linalg.solve(schur, cross)
-                #     )
-                def woodbury_downdate_solve(L, F, X, J, regul):
-                    # L L^T = F + sqrt(regul) I
-                    # F_loo = (tr(F) F - U^T U) / sqrt(tr(F)^2 - ||U||^2)
-
-                    d = regul**0.5
-                    m = X.shape[-2]
-
-                    X2 = X.movedim(-2, 0).reshape(m, -1)
-                    U = J.reshape(-1, m)  # J must have factor dimension last
-
-                    tr = torch.trace(F)
-                    tr_loo = torch.sqrt(tr.square() - U.square().sum())
-                    c = tr / tr_loo
-
-                    # F_loo + d I = c * [(F + d I) - V.T @ V]
-                    # V.T @ V = (U.T @ U + d * (tr - tr_loo) I) / tr
-                    V = torch.cat(
-                        [
-                            U / tr.sqrt(),
-                            torch.eye(m, dtype=X.dtype, device=X.device)
-                            * torch.sqrt(d * (tr - tr_loo) / tr),
-                        ],
-                        dim=0,
-                    )
-
-                    MinvX = torch.cholesky_solve(X2, L)
-                    MinvVt = torch.cholesky_solve(V.T, L)
-
-                    schur = (
-                        torch.eye(V.shape[0], dtype=X.dtype, device=X.device)
-                        - V @ MinvVt
-                    )
-
-                    Y2 = (MinvX + MinvVt @ torch.linalg.solve(schur, V @ MinvX)) / c
-
-                    return Y2.reshape((m,) + X.shape[:-2] + (X.shape[-1],)).movedim(
-                        0, -2
-                    )
-
-                # print(tr)
-                tr = torch.trace(F.data[layer_id][0])
-                # tr = ((J**2).sum()) ** 0.5
-                # print(tr)
-                # tr = torch.trace(F.data[layer_id][0])
-                # tr_loo = torch.sqrt(tr**2 - (J**2).sum(dim=(0, 2, 3), keepdim=True))
-                update = torch.einsum("onij, oniJ->jJ", J, J)
-                updated = F.data[layer_id][0] - update / tr + 0.1
-                updated = tr * updated
-                torch.testing.assert_close(
-                    F_loo.data[layer_id][0] + 0.1,
-                    updated / torch.trace(updated - 0.1 * tr) ** 0.5,
+                normalization_loo = torch.sqrt(
+                    cache[layer_id]["normalization_trace"].square() - J.square().sum()
                 )
-                # solve_g_loo = woodbury_downdate_solve(
-                #     cache[layer_id]["Lg"],
-                #     F.data[layer_id][0],
-                #     G,
-                #     J,
-                #     args.regul,
-                # )
-                # solve_ga_loo = woodbury_downdate_solve(
-                #     cache[layer_id]["La"],
-                #     F.data[layer_id][1],
-                #     solve_g_loo.transpose(-1, -2),
-                #     J.transpose(-1, -2),
-                #     args.regul,
-                # ).transpose(-1, -2)
-                # si_loo = torch.einsum("onij, Onij->noO", G, solve_ga_loo)
+                factor_scale = (
+                    cache[layer_id]["normalization_trace"] / normalization_loo
+                )
+                update_scale = normalization_loo.rsqrt()
+                a_update_root = J.reshape(-1, J.shape[-1]).mT * update_scale
+                g_update_root = (
+                    J.permute(2, 0, 1, 3).reshape(J.shape[2], -1)
+                    * update_scale
+                )
+                solve_g_loo = woodbury_downdate_solve(
+                    cache[layer_id]["g_eigh"],
+                    G,
+                    g_update_root,
+                    factor_scale,
+                )
+                solve_ga_loo = woodbury_downdate_solve(
+                    cache[layer_id]["a_eigh"],
+                    solve_g_loo.transpose(-1, -2),
+                    a_update_root,
+                    factor_scale,
+                ).transpose(-1, -2)
+                si_loo = torch.einsum("onij, Onij->noO", G, solve_ga_loo)
 
-                # solve_g_loo_true = solve(cache_loo[layer_id]["Lg"], G)
-                # solve_ga_loo_true = solve(
-                #     cache_loo[layer_id]["La"],
-                #     solve_g_loo_true.transpose(-1, -2),
-                # ).transpose(-1, -2)
-                # si_loo_true = torch.einsum("onij, Onij->noO", G, solve_ga_loo_true)
+                solve_g_loo_true = solve(cache_loo[layer_id]["Lg"], G)
+                solve_ga_loo_true = solve(
+                    cache_loo[layer_id]["La"],
+                    solve_g_loo_true.transpose(-1, -2),
+                ).transpose(-1, -2)
+                si_loo_true = torch.einsum("onij, Onij->noO", G, solve_ga_loo_true)
 
-                # print(
-                #     si.squeeze(),
-                #     si_loo.squeeze(),
-                #     si_loo_true.squeeze(),
-                # )
-                # torch.testing.assert_close(si_loo, si_loo_true)
+                print(
+                    si.squeeze(),
+                    si_loo.squeeze(),
+                    si_loo_true.squeeze(),
+                )
+                torch.testing.assert_close(si_loo, si_loo_true)
                 # %%
 
     elif isinstance(F, PMatBlockDiag):
