@@ -280,38 +280,41 @@ for i in range(args.runs):
         cache = {}
         cache_loo = {}
 
-        def solve(A, B, scale=1.0):
-            evals, evecs = A
+        def solve(A, B):
             shape = B.shape
             B = B.movedim(-2, 0).reshape(shape[-2], -1)
-            B = evecs.mT @ B
-            B = B.reshape(shape[-2], *shape[:-2], shape[-1]).movedim(0, -2)
-            scale = torch.as_tensor(scale, dtype=B.dtype, device=B.device)
-            scale = scale.reshape(
-                *scale.shape, *((1,) * (B.ndim - scale.ndim))
-            )
-            evals = evals.reshape(*((1,) * (B.ndim - 2)), -1, 1)
-            B /= scale * evals + args.regul**0.5
-            B = B.movedim(-2, 0).reshape(shape[-2], -1)
-            B = evecs @ B
+            B = torch.cholesky_solve(B, A)
             return B.reshape(shape[-2], *shape[:-2], shape[-1]).movedim(0, -2)
 
-        def woodbury_downdate_solve(solve, A, B, U):
-            FinvG = solve(A, B)
-            FinvJ = solve(A, U)
+        def woodbury_downdate_solve(A, B, U, trace, trace_loo):
+            batch_size, factor_dim = B.shape[0], B.shape[-2]
+            damping = args.regul**0.5
+            damping_update = torch.eye(
+                factor_dim, dtype=A.dtype, device=A.device
+            ).expand(batch_size, -1, -1)
+            damping_update = damping_update * (
+                damping * (trace - trace_loo) / trace
+            ).sqrt()[:, None, None]
+            U = torch.cat(
+                [U / trace.sqrt(), damping_update],
+                dim=-1,
+            )
+            A = A.expand(batch_size, -1, -1)
+            B_matrix = B.movedim(-2, 1).flatten(2)
+            FinvG = torch.cholesky_solve(B_matrix, A)
+            FinvJ = torch.cholesky_solve(U, A)
             leverage = U.mT @ FinvJ
-            FinvG_matrix = FinvG.movedim(-2, 1).flatten(2)
-            cross = U.mT @ FinvG_matrix
+            cross = U.mT @ FinvG
             schur = torch.eye(
                 leverage.shape[-1],
                 dtype=leverage.dtype,
                 device=leverage.device,
             ) - leverage
             effect = torch.linalg.solve(schur, cross)
-            correction = (FinvJ @ effect).reshape(
-                B.shape[0], B.shape[-2], *B.shape[1:-2], B.shape[-1]
+            result = ((FinvG + FinvJ @ effect) * (trace_loo / trace)[:, None, None])
+            return result.reshape(
+                batch_size, factor_dim, *B.shape[1:-2], B.shape[-1]
             ).movedim(1, -2)
-            return FinvG + correction
 
         for layer_id, layer in tqdm(lc.layers.items()):
             a, g = F.data[layer_id]
@@ -321,8 +324,16 @@ for i in range(args.runs):
                 a, g = g, a
 
             cache[layer_id] = {
-                "eig_a": torch.linalg.eigh(a),
-                "eig_g": torch.linalg.eigh(g),
+                "La": torch.linalg.cholesky(
+                    a
+                    + args.regul**0.5
+                    * torch.eye(a.shape[0], dtype=a.dtype, device=a.device)
+                ),
+                "Lg": torch.linalg.cholesky(
+                    g
+                    + args.regul**0.5
+                    * torch.eye(g.shape[0], dtype=g.dtype, device=g.device)
+                ),
                 "trace": trace,
             }
 
@@ -333,8 +344,16 @@ for i in range(args.runs):
                     a, g = g, a
                 cache_loo[layer_id].append(
                     {
-                        "eig_a": torch.linalg.eigh(a),
-                        "eig_g": torch.linalg.eigh(g),
+                        "La": torch.linalg.cholesky(
+                            a
+                            + args.regul**0.5
+                            * torch.eye(a.shape[0], dtype=a.dtype, device=a.device)
+                        ),
+                        "Lg": torch.linalg.cholesky(
+                            g
+                            + args.regul**0.5
+                            * torch.eye(g.shape[0], dtype=g.dtype, device=g.device)
+                        ),
                     }
                 )
 
@@ -370,9 +389,9 @@ for i in range(args.runs):
                 if layer.has_bias():
                     J = torch.cat([Jw, Jb.unsqueeze(-1)], dim=-1)
 
-                solve_g = solve(cache[layer_id]["eig_g"], G)
+                solve_g = solve(cache[layer_id]["Lg"], G)
                 solve_ga = solve(
-                    cache[layer_id]["eig_a"], solve_g.transpose(-1, -2)
+                    cache[layer_id]["La"], solve_g.transpose(-1, -2)
                 ).transpose(-1, -2)
                 si = torch.einsum("onij, Onij->noO", G, solve_ga)
 
@@ -380,32 +399,33 @@ for i in range(args.runs):
                 trace_loo = torch.sqrt(trace**2 - J.square().sum(dim=(0, 2, 3)))
                 a_update_root = J.permute(1, 3, 0, 2).reshape(
                     J.shape[1], J.shape[3], -1
-                ) * trace_loo[:, None, None].rsqrt()
-                g_update_root = (
-                    J.permute(1, 2, 0, 3).reshape(J.shape[1], J.shape[2], -1)
-                    * trace_loo[:, None, None].rsqrt()
+                )
+                g_update_root = J.permute(1, 2, 0, 3).reshape(
+                    J.shape[1], J.shape[2], -1
                 )
                 G_loo = G.permute(1, 0, 2, 3)
                 solve_g_loo = woodbury_downdate_solve(
-                    partial(solve, scale=trace / trace_loo),
-                    cache[layer_id]["eig_g"],
+                    cache[layer_id]["Lg"],
                     G_loo,
                     g_update_root,
+                    trace,
+                    trace_loo,
                 )
                 solve_ga_loo = woodbury_downdate_solve(
-                    partial(solve, scale=trace / trace_loo),
-                    cache[layer_id]["eig_a"],
+                    cache[layer_id]["La"],
                     solve_g_loo.transpose(-1, -2),
                     a_update_root,
+                    trace,
+                    trace_loo,
                 ).transpose(-1, -2)
                 si_loo = torch.einsum("boij,bOij->boO", G_loo, solve_ga_loo)
 
                 si_loo_true = []
                 for loo_index, loo_cache in enumerate(cache_loo[layer_id]):
                     G_i = G[:, loo_index : loo_index + 1]
-                    solve_g_loo_true = solve(loo_cache["eig_g"], G_i)
+                    solve_g_loo_true = solve(loo_cache["Lg"], G_i)
                     solve_ga_loo_true = solve(
-                        loo_cache["eig_a"],
+                        loo_cache["La"],
                         solve_g_loo_true.transpose(-1, -2),
                     ).transpose(-1, -2)
                     si_loo_true.append(
