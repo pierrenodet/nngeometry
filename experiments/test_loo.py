@@ -81,7 +81,7 @@ args.competitors = True
 args.seed = 1337
 args.ft = False
 args.output_dir = "mislabeled-output"
-args.device = "mps"
+args.device = "cuda"
 
 
 os.makedirs(args.output_dir, exist_ok=True)
@@ -278,63 +278,47 @@ for i in range(args.runs):
         cache = {}
         cache_loo = {}
 
-        def eigensolve(eigh, rhs, scale=1.0):
-            eigenvalues, eigenvectors = eigh
-            projected = torch.einsum("de,ondk->onek", eigenvectors, rhs)
-            projected /= (
-                scale * eigenvalues[None, None, :, None] + args.regul**0.5
-            )
-            return torch.einsum("de,onek->ondk", eigenvectors, projected)
+        def solve(A, B, scale=1.0):
+            evals, evecs = A
+            projected = torch.einsum("de,ondk->onek", evecs, B)
+            projected /= scale * evals[None, None, :, None] + args.regul**0.5
+            return torch.einsum("de,onek->ondk", evecs, projected)
 
-        def woodbury_downdate_solve(eigh, rhs, update_root, scale):
-            Finv_rhs = eigensolve(eigh, rhs, scale)
-            Finv_update = eigensolve(
-                eigh, update_root[None, None], scale
-            ).squeeze(0, 1)
-            leverage = update_root.mT @ Finv_update
-            cross = torch.einsum("dr,ondk->ronk", update_root, Finv_rhs)
+        def woodbury_downdate_solve(solve, A, B, U):
+            FinvG = solve(A, B)
+            FinvJ = solve(A, U)
+            leverage = torch.einsum("onij, Onij->noO", U, FinvJ)
+            cross = torch.einsum("onij, Onij->noO", U, FinvG)
             schur = (
                 torch.eye(
-                    leverage.shape[0],
+                    leverage.shape[-1],
                     dtype=leverage.dtype,
                     device=leverage.device,
-                )
+                )[None, ...]
                 - leverage
             )
-            effect = torch.linalg.solve(schur, cross.flatten(1)).view_as(cross)
-            return Finv_rhs + torch.einsum("dr,ronk->ondk", Finv_update, effect)
+            effect = torch.linalg.solve(schur, cross)
+            return FinvG + torch.einsum("onij,noO->Onij", FinvJ, effect)
 
         for layer_id, layer in tqdm(lc.layers.items()):
             a, g = F.data[layer_id]
-            normalization_trace = torch.trace(g)
+            trace = torch.trace(g)
 
             if layer.transposed:
                 a, g = g, a
 
             cache[layer_id] = {
-                "a_eigh": torch.linalg.eigh(a),
-                "g_eigh": torch.linalg.eigh(g),
-                "normalization_trace": normalization_trace,
+                "eig_a": torch.linalg.eigh(a),
+                "eig_g": torch.linalg.eigh(g),
+                "trace": trace,
             }
 
-            def solve(A, B):
-                return torch.cholesky_solve(B, A)
-
             a, g = F_loo.data[layer_id]
-
             if layer.transposed:
                 a, g = g, a
-
-            a_reg = a + args.regul**0.5 * torch.eye(
-                a.shape[0], dtype=a.dtype, device=a.device
-            )
-            g_reg = g + args.regul**0.5 * torch.eye(
-                g.shape[0], dtype=g.dtype, device=g.device
-            )
-
             cache_loo[layer_id] = {
-                "La": torch.linalg.cholesky(a_reg),
-                "Lg": torch.linalg.cholesky(g_reg),
+                "eig_a": torch.linalg.eigh(a),
+                "eig_g": torch.linalg.eigh(g),
             }
 
         for inputs, targets in tqdm(noisy_train_removed):
@@ -369,41 +353,34 @@ for i in range(args.runs):
                 if layer.has_bias():
                     J = torch.cat([Jw, Jb.unsqueeze(-1)], dim=-1)
 
-                solve_g = eigensolve(cache[layer_id]["g_eigh"], G)
-                solve_ga = eigensolve(
-                    cache[layer_id]["a_eigh"], solve_g.transpose(-1, -2)
+                solve_g = solve(cache[layer_id]["eig_g"], G)
+                solve_ga = solve(
+                    cache[layer_id]["eig_a"], solve_g.transpose(-1, -2)
                 ).transpose(-1, -2)
                 si = torch.einsum("onij, Onij->noO", G, solve_ga)
 
-                normalization_loo = torch.sqrt(
-                    cache[layer_id]["normalization_trace"].square() - J.square().sum()
-                )
-                factor_scale = (
-                    cache[layer_id]["normalization_trace"] / normalization_loo
-                )
-                update_scale = normalization_loo.rsqrt()
-                a_update_root = J.reshape(-1, J.shape[-1]).mT * update_scale
-                g_update_root = (
-                    J.permute(2, 0, 1, 3).reshape(J.shape[2], -1)
-                    * update_scale
+                trace = cache[layer_id]["trace"]
+                trace_loo = torch.sqrt(
+                    cache[layer_id]["trace"] ** 2
+                    - (J**2).sum(dim=(0, 2, 3), keepdim=True)
                 )
                 solve_g_loo = woodbury_downdate_solve(
-                    cache[layer_id]["g_eigh"],
+                    partial(solve, scale=trace / trace_loo),
+                    cache[layer_id]["eig_g"],
                     G,
-                    g_update_root,
-                    factor_scale,
+                    J * trace_loo.rsqrt(),
                 )
                 solve_ga_loo = woodbury_downdate_solve(
-                    cache[layer_id]["a_eigh"],
+                    partial(solve, scale=trace / trace_loo),
+                    cache[layer_id]["eig_a"],
                     solve_g_loo.transpose(-1, -2),
-                    a_update_root,
-                    factor_scale,
+                    J.transpose(-1, -2) * trace_loo.rsqrt(),
                 ).transpose(-1, -2)
                 si_loo = torch.einsum("onij, Onij->noO", G, solve_ga_loo)
 
-                solve_g_loo_true = solve(cache_loo[layer_id]["Lg"], G)
+                solve_g_loo_true = solve(cache_loo[layer_id]["eig_g"], G)
                 solve_ga_loo_true = solve(
-                    cache_loo[layer_id]["La"],
+                    cache_loo[layer_id]["eig_a"],
                     solve_g_loo_true.transpose(-1, -2),
                 ).transpose(-1, -2)
                 si_loo_true = torch.einsum("onij, Onij->noO", G, solve_ga_loo_true)
