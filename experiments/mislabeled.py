@@ -92,7 +92,7 @@ torch.manual_seed(args.seed)
 transform, dataset, model_fn, optimizer_fn, classes = DATASETS[args.dataset]
 
 # model_fn = partial(model_fn, c=16)
-model_fn = partial(model_fn, c=32, h=4, d=4)
+model_fn = partial(model_fn, c=64, h=1, d=8)
 
 if transform is not None:
     if hasattr(transform, "transforms"):
@@ -193,7 +193,7 @@ for i in range(args.runs):
     print(record)
     records.append(record)
     # %%
-    args.repr = "F_kfac"
+    args.repr = "F_bd"
     if "last" in args.repr:
         repr = PMatDense
         lc = last_layer(LayerCollection.from_model(model))
@@ -232,10 +232,10 @@ for i in range(args.runs):
     def loss(inputs, targets):
         return tF.cross_entropy(model(inputs), targets, reduction="none")
 
+    from nngeometry.metrics import sqrt_var_classif_logits
+
     def func(inputs, targets):
-        log_prob = tF.log_softmax(model(inputs), dim=1)
-        prob = torch.exp(log_prob).detach()
-        return torch.sqrt(prob) * log_prob
+        return sqrt_var_classif_logits(model(inputs))
 
     def logits(inputs, targets):
         return model(inputs)
@@ -255,7 +255,7 @@ for i in range(args.runs):
     avg_lam = F.trace() / F.layer_collection.numel()
     print(avg_lam)
     args.regul = 1e-4
-    light_noisy_noaug = DataLoader(noisy_train_set, batch_size=15)
+    light_noisy_noaug = DataLoader(noisy_train_set, batch_size=32)
 
     self_influence = []
     self_influence_loo = []
@@ -444,21 +444,21 @@ for i in range(args.runs):
                         "onij, noO-> Onij", FinvJ, torch.linalg.solve(schur, cross)
                     )
 
-                tr_loo = torch.trace(
-                    torch.einsum("onij, onIj->iI", J, J) / (J.shape[1] ** 0.5)
-                )
-                print(tr_loo)
+                # tr = J.square().sum(dim=(0, 2, 3), keepdim=True) ** 2
+                # print(tr)
+                tr = torch.sqrt(torch.trace(F.data[layer_id][0]))
                 solve_g_loo = woodbury_downdate_solve(
                     cache[layer_id]["Lg"],
                     G,
-                    J / tr_loo**0.5,
+                    J / tr,
                 )
                 solve_ga_loo = woodbury_downdate_solve(
                     cache[layer_id]["La"],
                     solve_g_loo.transpose(-1, -2),
-                    J.transpose(-1, -2) / tr_loo**0.5,
+                    J.transpose(-1, -2) / tr,
                 ).transpose(-1, -2)
                 si_loo.append(torch.einsum("onij, Onij->noO", G, solve_ga_loo))
+
                 # U_g = J.permute(1, 2, 0, 3).reshape(
                 #     batch_size,
                 #     out_dim,
@@ -782,10 +782,10 @@ for i in range(args.runs):
     # %%
     self_influence = torch.cat(self_influence, dim=1)
     self_influence_loo = torch.cat(self_influence_loo, dim=1)
-    # leverages = torch.cat(leverages, dim=1)
-    # leverages_loo = torch.cat(leverages_loo, dim=1)
-    # cooks = torch.cat(cooks, dim=1)
-    # det_schurs = torch.cat(det_schurs, dim=1)
+    leverages = torch.cat(leverages, dim=1)
+    leverages_loo = torch.cat(leverages_loo, dim=1)
+    cooks = torch.cat(cooks, dim=1)
+    det_schurs = torch.cat(det_schurs, dim=1)
 
     # %%
     losses = []
@@ -795,11 +795,11 @@ for i in range(args.runs):
     losses = torch.cat(losses)
     # %%
 
-    tr_self_influence = torch.vmap(torch.vmap(torch.trace))(self_influence)
-    tr_self_influence_loo = torch.vmap(torch.vmap(torch.trace))(self_influence_loo)
-    tr_leverages = torch.vmap(torch.vmap(torch.trace))(leverages)
-    tr_leverages_loo = torch.vmap(torch.vmap(torch.trace))(leverages_loo)
-    tr_cooks = torch.vmap(torch.vmap(torch.trace))(cooks)
+    tr_self_influence = torch.diagonal(self_influence, dim1=-2, dim2=-1).sum(dim=-1)
+    tr_self_influence_loo =  torch.diagonal(self_influence_loo, dim1=-2, dim2=-1).sum(dim=-1)
+    tr_leverages = torch.diagonal(leverages, dim1=-2, dim2=-1).sum(dim=-1)
+    tr_leverages_loo = torch.diagonal(leverages_loo, dim1=-2, dim2=-1).sum(dim=-1)
+    tr_cooks = torch.diagonal(cooks, dim1=-2, dim2=-1).sum(dim=-1)
 
     n_blocks = len(lc.layers)
 
