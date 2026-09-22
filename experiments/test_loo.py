@@ -239,6 +239,11 @@ else:  # kfac
         a, g = F.data[layer_id]
         a *= N**0.5
         g *= N**0.5
+if isinstance(F, PMatLowRank):
+    J = F.data.view(-1, F.data.size(-1)).t()
+    _, evals, evecs = torch.svd_lowrank(J.t(), q=100 + 20)
+    J = (evecs[:, :100] * evals[:100]).t()
+    F = PMatLowRank(F.layer_collection, F.generator, data=J)
 n_loo = 4 if isinstance(F, PMatKFAC) else 5
 indices_loo = torch.randperm(N)[:n_loo]
 noisy_train_removed = DataLoader(
@@ -275,6 +280,11 @@ for index_loo in indices_loo:
             a, g = F_loo.data[layer_id]
             a *= (N - 1) ** 0.5
             g *= (N - 1) ** 0.5
+    if isinstance(F_loo, PMatLowRank):
+        J = F_loo.data.view(-1, F_loo.data.size(-1)).t()
+        _, evals, evecs = torch.svd_lowrank(J.t(), q=100 + 20)
+        J = (evecs[:, :100] * evals[:100]).t()
+        F_loo = PMatLowRank(F_loo.layer_collection, F_loo.generator, data=J)
     F_loos.append(F_loo)
 F_loo = F_loos[0]
 # %%
@@ -435,6 +445,7 @@ elif isinstance(F, PMatLowRank):
             C + args.regul * torch.eye(C.shape[0], device=args.device)
         ),
     )
+    F.compute_eigendecomposition(impl="svd")
 
     for inputs, targets in tqdm(noisy_train_removed):
         pfmap_func = Jacobian(
@@ -450,45 +461,75 @@ elif isinstance(F, PMatLowRank):
             layer_collection=lc,
         )
 
+        # si = torch.einsum(
+        #     "onp, Onp->noO",
+        #     pfmap_grad.to_torch(),
+        #     F.solve(pfmap_grad, regul=args.regul).to_torch(),
+        # )
+
+        # G = pfmap_grad.to_torch().view(-1, pfmap_grad.size(-1))
+        # FinvG = (
+        #     torch.cholesky_solve(U @ G.t(), Lc)
+        #     .t()
+        #     .reshape(pfmap_grad.size(0), pfmap_grad.size(1), -1)
+        # )
+        # J = pfmap_func.to_torch().view(-1, pfmap_func.size(-1))
+        # FinvJ = (
+        #     torch.cholesky_solve(U @ J.t(), Lc)
+        #     .t()
+        #     .reshape(pfmap_func.size(0), pfmap_func.size(1), -1)
+        # )
+        # leverage = torch.einsum(
+        #     "onp, Onp->noO",
+        #     (U @ J.t()).t().reshape(pfmap_func.size(0), pfmap_func.size(1), -1),
+        #     FinvJ,
+        # )
+        # schur = torch.eye(leverage.shape[-1], device=args.device) - leverage
+        # cross = torch.einsum(
+        #     "onp, Onp->noO",
+        #     (U @ G.t()).t().reshape(pfmap_grad.size(0), pfmap_grad.size(1), -1),
+        #     FinvJ,
+        # )
+        # loo_effect = torch.linalg.solve(schur, cross.transpose(1, 2))
+        # si_loo = si + cross @ loo_effect
+
         si = torch.einsum(
             "onp, Onp->noO",
             pfmap_grad.to_torch(),
-            F.solve(pfmap_grad, regul=args.regul).to_torch(),
+            F.solve(
+                pfmap_grad, regul=args.regul, solve="eigendecomposition", rcond=0
+            ).to_torch(),
         )
-
-        G = pfmap_grad.to_torch().view(-1, pfmap_grad.size(-1))
-        FinvG = (
-            torch.cholesky_solve(U @ G.t(), Lc)
-            .t()
-            .reshape(pfmap_grad.size(0), pfmap_grad.size(1), -1)
-        )
-        J = pfmap_func.to_torch().view(-1, pfmap_func.size(-1))
-        FinvJ = (
-            torch.cholesky_solve(U @ J.t(), Lc)
-            .t()
-            .reshape(pfmap_func.size(0), pfmap_func.size(1), -1)
-        )
+        FinvJ = F.solve(
+            pfmap_func, regul=args.regul, solve="eigendecomposition", rcond=0
+        ).to_torch()
         leverage = torch.einsum(
             "onp, Onp->noO",
-            (U @ J.t()).t().reshape(pfmap_func.size(0), pfmap_func.size(1), -1),
+            pfmap_func.to_torch(),
+            FinvJ,
+        )
+        cross = torch.einsum(
+            "onp, Onp->noO",
+            pfmap_grad.to_torch(),
             FinvJ,
         )
         schur = torch.eye(leverage.shape[-1], device=args.device) - leverage
-        cross = torch.einsum(
-            "onp, Onp->noO",
-            (U @ G.t()).t().reshape(pfmap_grad.size(0), pfmap_grad.size(1), -1),
-            FinvJ,
-        )
         loo_effect = torch.linalg.solve(schur, cross.transpose(1, 2))
         si_loo = si + cross @ loo_effect
 
         si_loo_true = []
         for F_loo in F_loos:
+            F_loo.compute_eigendecomposition(impl="svd")
             si_loo_true.append(
                 torch.einsum(
                     "onp, Onp->noO",
                     pfmap_grad.to_torch(),
-                    F_loo.solve(pfmap_grad, regul=args.regul).to_torch(),
+                    F_loo.solve(
+                        pfmap_grad,
+                        regul=args.regul,
+                        solve="eigendecomposition",
+                        rcond=0,
+                    ).to_torch(),
                 )
             )
         si_loo_true = torch.cat(si_loo_true)
