@@ -44,9 +44,7 @@ class FMatAbstract(ABC):
         elif isinstance(x, PFMapDense):
             return self.solvePFMap(x, regul=regul, solve=solve, **kwargs)
         else:
-            raise NotImplementedError(
-                "`x` should be an instance of FVector or PFMap"
-            )
+            raise NotImplementedError("`x` should be an instance of FVector or PFMap")
 
 
 class FMatDense(FMatAbstract):
@@ -139,7 +137,7 @@ class FMatDense(FMatAbstract):
         except (AttributeError, AssertionError):
             s = self.data.size()
 
-            L = torch.linalg.cholesky(
+            L = torch.linalg.lu_factor(
                 self.data.view(s[0] * s[1], s[2] * s[3])
                 + (regul * s[1])
                 * torch.eye(s[0] * s[1], device=self.data.device, dtype=self.data.dtype)
@@ -152,7 +150,10 @@ class FMatDense(FMatAbstract):
 
     def inv(self, regul=1e-8):
         s = self.data.size()
-        Minv = torch.cholesky_inverse(self._cholesky(regul))
+        Minv =  torch.linalg.lu_solve(
+            *self._cholesky(regul),
+            torch.eye(s[0] * s[1], device=self.data.device, dtype=self.data.dtype),
+        )
 
         return FMatDense(
             layer_collection=self.layer_collection,
@@ -164,7 +165,7 @@ class FMatDense(FMatAbstract):
         s = self.data.size()
         v_flat = v.to_torch().view(-1, 1)
         if solve in ["default", "solve"]:
-            solution = torch.cholesky_solve(v_flat, self._cholesky(regul))
+            solution = torch.linalg.lu_solve(*self._cholesky(regul), v_flat)
         else:
             raise NotImplementedError
 
@@ -175,7 +176,7 @@ class FMatDense(FMatAbstract):
         sJ = pfmap.size()
         J = pfmap.to_torch().view(sJ[0] * sJ[1], -1)
         if solve in ["default", "solve"]:
-            solution = torch.cholesky_solve(J, self._cholesky(regul))
+            solution =  torch.linalg.lu_solve(*self._cholesky(regul), J)
         else:
             raise NotImplementedError
 
