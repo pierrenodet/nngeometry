@@ -53,6 +53,7 @@ from nngeometry.backend import TorchHooksJacobianBackend
 from nngeometry.jacobian import Jacobian
 from nngeometry.layercollection import LayerCollection
 from nngeometry.metrics import FIM, FIM_MonteCarlo
+from nngeometry.object.map import random_pfmap
 from nngeometry.object.pspace import PMatBlockDiag, PMatDense, PMatEKFAC, PMatKFAC
 from nngeometry.object.vector import FVector
 
@@ -93,7 +94,7 @@ torch.manual_seed(args.seed)
 transform, dataset, model_fn, optimizer_fn, classes = DATASETS[args.dataset]
 
 # model_fn = partial(model_fn, c=16)
-model_fn = partial(model_fn, c=32, h=8, d=4)
+model_fn = partial(model_fn, c=32, h=4, d=8)
 
 if transform is not None:
     if hasattr(transform, "transforms"):
@@ -199,11 +200,9 @@ for i in range(args.runs):
     # %%
     from nngeometry.object.pspace import PMatLowRank
 
-    args.repr = "F_lr"
-    if "last" in args.repr:
-        repr = PMatDense
-        lc = last_layer(LayerCollection.from_model(model))
-    elif "kfac" in args.repr:
+    args.rank = 1000
+    args.repr = "F_ekfac"
+    if "kfac" in args.repr:
         repr = partial(PMatKFAC, strategy="one_iter_kpsvd")
         # repr = PMatKFAC
         # repr = PMatEKFAC
@@ -264,6 +263,67 @@ for i in range(args.runs):
                 a, g = F.data[layer_id]
                 a *= N**0.5
                 g *= N**0.5
+
+    def qr(pfmap):
+        from nngeometry.object.fspace import FMatDense
+        from nngeometry.object.map import PFMapDense
+
+        sJ = pfmap.size()
+
+        Q, R = torch.linalg.qr(pfmap.to_torch().view(-1, sJ[-1]).t(), mode="reduced")
+        Q = PFMapDense(pfmap.layer_collection, pfmap.generator, data=Q.t().view(*sJ))
+        R = FMatDense(
+            pfmap.layer_collection,
+            pfmap.generator,
+            data=R.view(sJ[0], sJ[1], sJ[0], sJ[1]),
+        )
+        return Q, R
+
+    from nngeometry.object.map import random_pfmap
+
+    def rnystroem(A, k, regul=1e-8):
+        lc = A.layer_collection
+
+        # isn't there a better way ?
+        layerid_to_mod = lc.get_layerid_module_map(A.generator.model)
+        device = A.generator._check_same_device(layerid_to_mod.values())
+        dtype = A.generator._check_same_dtype(layerid_to_mod.values())
+
+        S = random_pfmap(lc, (k, 1), device, dtype)
+        S, _ = qr(S)
+        Y = A @ S
+        Y = Y
+        C = S @ Y.adjoint()
+        B = C.solve(Y, regul=regul)
+        evecs, evals, _ = torch.linalg.svd(
+            B.to_torch().view(-1, B.size(-1)).t(), full_matrices=False
+        )
+        evals = torch.clamp(evals**2 - regul, min=0)
+        return evals, evecs
+
+    if args.rank is not None and isinstance(F, PMatLowRank):
+        # _, evals, evecs = torch.svd_lowrank(
+        #     F.data.view(-1, F.size(1)), q=20 + args.rank, niter=20
+        # )
+        # evals = evals**2
+        evals, evecs = rnystroem(F, k=args.rank)
+        evals = evals**2
+        # F.compute_eigendecomposition(impl="gram_eigh")
+        # evals, evecs = F.get_eigendecomposition()
+
+    # %%
+    if args.rank is not None and isinstance(F, PMatLowRank):
+        print(evecs.shape)
+        lr_evals, lr_evecs = evals[-args.rank :], evecs[:, -args.rank :]
+        print(evals)
+        F_old = F
+        F = PMatLowRank(
+            F.layer_collection,
+            F.generator,
+            data=(lr_evecs * (lr_evals[None, :] ** 0.5)).t(),
+        )
+        F.evals = lr_evals
+        F.evecs = lr_evecs
     # %%
     avg_lam = F.trace() / F.layer_collection.numel()
     print(avg_lam)
@@ -278,14 +338,14 @@ for i in range(args.runs):
     cooks = []
     cache = {}
     if isinstance(F, PMatLowRank):
-        Q, R = torch.linalg.qr(F.data.view(-1, F.size(0)).t(), mode="reduced")
-        C = R @ R.t()
-        U, Lc = (
-            Q.t(),
-            torch.linalg.cholesky(
-                C + args.regul * torch.eye(C.shape[0], device=args.device)
-            ),
-        )
+        # Q, R = torch.linalg.qr(F.data.view(-1, F.size(0)).t(), mode="reduced")
+        # C = R @ R.t()
+        # U, Lc = (
+        #     Q.t(),
+        #     torch.linalg.cholesky(
+        #         C + args.regul * torch.eye(C.shape[0], device=args.device)
+        #     ),
+        # )
         # F.compute_eigendecomposition(impl="svd")
         # evals, evecs = F.get_eigendecomposition()
         # evals, evecs = evals[:100], evecs[:, :100]
@@ -294,55 +354,6 @@ for i in range(args.runs):
         # F.evecs = evecs
 
         for inputs, targets in tqdm(light_noisy_noaug):
-            pfmap_func = Jacobian(
-                model,
-                (inputs, targets),
-                function=func,
-                layer_collection=lc,
-            )
-            pfmap_grad = Jacobian(
-                model,
-                (inputs, targets),
-                function=loss,
-                layer_collection=lc,
-            )
-            G = pfmap_grad.to_torch().view(-1, pfmap_grad.size(-1))
-            FinvG = (
-                torch.cholesky_solve(U @ G.t(), Lc)
-                .t()
-                .reshape(pfmap_grad.size(0), pfmap_grad.size(1), -1)
-            )
-            si = torch.einsum(
-                "onp, Onp->noO",
-                (U @ G.t()).t().reshape(pfmap_grad.size(0), pfmap_grad.size(1), -1),
-                FinvG,
-            )
-            J = pfmap_func.to_torch().view(-1, pfmap_func.size(-1))
-            FinvJ = (
-                torch.cholesky_solve(U @ J.t(), Lc)
-                .t()
-                .reshape(pfmap_func.size(0), pfmap_func.size(1), -1)
-            )
-            leverage = torch.einsum(
-                "onp, Onp->noO",
-                (U @ J.t()).t().reshape(pfmap_func.size(0), pfmap_func.size(1), -1),
-                FinvJ,
-            )
-            schur = torch.eye(leverage.shape[-1], device=args.device) - leverage
-            cross = torch.einsum(
-                "onp, Onp->noO",
-                (U @ G.t()).t().reshape(pfmap_grad.size(0), pfmap_grad.size(1), -1),
-                FinvJ,
-            )
-            loo_effect = torch.linalg.solve(schur, cross.transpose(1, 2))
-            self_influence.append(si)
-            self_influence_loo.append(si + cross @ loo_effect)
-            leverages.append(leverage)
-            leverages_loo.append(torch.linalg.solve(schur, leverage.transpose(1, 2)))
-            det_schurs.append(torch.logdet(schur))
-            cooks.append(
-                si + cross @ loo_effect + loo_effect.transpose(1, 2) @ loo_effect
-            )
             # pfmap_func = Jacobian(
             #     model,
             #     (inputs, targets),
@@ -355,29 +366,37 @@ for i in range(args.runs):
             #     function=loss,
             #     layer_collection=lc,
             # )
+            # G = pfmap_grad.to_torch().view(-1, pfmap_grad.size(-1))
+            # FinvG = (
+            #     torch.cholesky_solve(U @ G.t(), Lc)
+            #     .t()
+            #     .reshape(pfmap_grad.size(0), pfmap_grad.size(1), -1)
+            # )
             # si = torch.einsum(
             #     "onp, Onp->noO",
-            #     pfmap_grad.to_torch(),
-            #     F.solve(
-            #         pfmap_grad, regul=args.regul, solve="eigendecomposition", rcond=0
-            #     ).to_torch(),
+            #     (U @ G.t()).t().reshape(pfmap_grad.size(0), pfmap_grad.size(1), -1),
+            #     FinvG,
             # )
-            # FinvJ = F.solve(
-            #     pfmap_func, regul=args.regul, solve="eigendecomposition", rcond=0
-            # ).to_torch()
+            # J = pfmap_func.to_torch().view(-1, pfmap_func.size(-1))
+            # FinvJ = (
+            #     torch.cholesky_solve(U @ J.t(), Lc)
+            #     .t()
+            #     .reshape(pfmap_func.size(0), pfmap_func.size(1), -1)
+            # )
             # leverage = torch.einsum(
             #     "onp, Onp->noO",
-            #     pfmap_func.to_torch(),
+            #     (U @ J.t()).t().reshape(pfmap_func.size(0), pfmap_func.size(1), -1),
             #     FinvJ,
             # )
+            # schur = torch.eye(leverage.shape[-1], device=args.device) - leverage
+            # # print(torch.linalg.eigvalsh(schur).amin(dim=-1))
             # cross = torch.einsum(
             #     "onp, Onp->noO",
-            #     pfmap_grad.to_torch(),
+            #     (U @ G.t()).t().reshape(pfmap_grad.size(0), pfmap_grad.size(1), -1),
             #     FinvJ,
             # )
-            # self_influence.append(si)
-            # schur = torch.eye(leverage.shape[-1], device=args.device) - leverage
             # loo_effect = torch.linalg.solve(schur, cross.transpose(1, 2))
+            # self_influence.append(si)
             # self_influence_loo.append(si + cross @ loo_effect)
             # leverages.append(leverage)
             # leverages_loo.append(torch.linalg.solve(schur, leverage.transpose(1, 2)))
@@ -385,6 +404,58 @@ for i in range(args.runs):
             # cooks.append(
             #     si + cross @ loo_effect + loo_effect.transpose(1, 2) @ loo_effect
             # )
+            pfmap_func = Jacobian(
+                model,
+                (inputs, targets),
+                function=func,
+                layer_collection=lc,
+            )
+            pfmap_grad = Jacobian(
+                model,
+                (inputs, targets),
+                function=loss,
+                layer_collection=lc,
+            )
+            FinvG = F.solve(
+                pfmap_grad, regul=args.regul, solve="eigendecomposition"
+            ).to_torch()
+            si = torch.einsum(
+                "onp, Onp->noO",
+                pfmap_grad.to_torch(),
+                FinvG,
+            )
+            downdate = torch.einsum(
+                "onp, Onp->noO",
+                pfmap_func.to_torch(),
+                F.solve(
+                    pfmap_func, regul=args.regul, solve="eigendecomposition", rcond=0
+                ).to_torch(),
+            )
+            cross = torch.einsum(
+                "onp, Onp->noO",
+                pfmap_func.to_torch(),
+                FinvG,
+            )
+            self_influence.append(si)
+            schur = torch.eye(downdate.shape[-1], device=args.device) - downdate
+            loo_effect = torch.linalg.solve(schur, cross)
+            si_loo = cross.transpose(1, 2) @ loo_effect
+            self_influence_loo.append(si + si_loo)
+            FinvJ = F.solve(
+                pfmap_func, regul=args.regul, solve="eigendecomposition"
+            ).to_torch()
+            leverage = torch.einsum(
+                "onp, Onp->noO",
+                pfmap_func.to_torch(),
+                FinvJ,
+            )
+            leverages.append(leverage)
+            leverages_loo.append(
+                leverage
+                + leverage @ torch.linalg.solve(schur, leverage.transpose(1, 2))
+            )
+            det_schurs.append(torch.logdet(schur))
+            cooks.append(si + si_loo + loo_effect.transpose(1, 2) @ loo_effect)
     elif isinstance(F, FMatDense):
         alpha = F.solve(
             FVector(
@@ -801,8 +872,8 @@ for i in range(args.runs):
         self_influence_loo = torch.cat(self_influence_loo, dim=1)
         leverages = torch.cat(leverages, dim=1)
         leverages_loo = torch.cat(leverages_loo, dim=1)
-        # cooks = torch.cat(cooks, dim=1)
-        # det_schurs = torch.cat(det_schurs, dim=1)
+        cooks = torch.cat(cooks, dim=1)
+        det_schurs = torch.cat(det_schurs, dim=1)
 
     # %%
     losses = []
@@ -825,19 +896,19 @@ for i in range(args.runs):
     tr_self_influence_loo = torch.diagonal(self_influence_loo, dim1=-2, dim2=-1).sum(
         dim=-1
     )
+    # tr_cooks = torch.diagonal(cooks, dim1=-2, dim2=-1).sum(dim=-1)
     tr_leverages = torch.diagonal(leverages, dim1=-2, dim2=-1).sum(dim=-1)
     tr_leverages_loo = torch.diagonal(leverages_loo, dim1=-2, dim2=-1).sum(dim=-1)
-    # tr_cooks = torch.diagonal(cooks, dim1=-2, dim2=-1).sum(dim=-1)
 
     n_blocks = self_influence.shape[0]
 
     for name, scores in [
         ("self-influence", tr_self_influence),
         ("LOO self-influence (or cook bar)", tr_self_influence_loo),
+        # ("cook", tr_cooks),
         ("leverage", tr_leverages),
         ("LOO leverage", tr_leverages_loo),
         # ("det schur", -det_schurs),
-        # ("cook", tr_cooks),
     ]:
         plt.plot(
             [
@@ -861,20 +932,20 @@ for i in range(args.runs):
         roc_auc_score(
             noisy_examples, tr_self_influence_loo.sum(dim=0).numpy(force=True)
         ),
+        # roc_auc_score(noisy_examples, tr_cooks.sum(dim=0).numpy(force=True)),
         roc_auc_score(noisy_examples, tr_leverages.sum(dim=0).numpy(force=True)),
         roc_auc_score(noisy_examples, tr_leverages_loo.sum(dim=0).numpy(force=True)),
         # roc_auc_score(noisy_examples, -det_schurs.sum(dim=0).numpy(force=True)),
-        # roc_auc_score(noisy_examples, tr_cooks.sum(dim=0).numpy(force=True)),
     )
     print(
         roc_auc_score(noisy_examples, losses.numpy(force=True)),
         roc_auc_score(noisy_examples, margins.numpy(force=True)),
         roc_auc_score(noisy_examples, tr_self_influence[-1].numpy(force=True)),
         roc_auc_score(noisy_examples, tr_self_influence_loo[-1].numpy(force=True)),
+        # roc_auc_score(noisy_examples, tr_cooks[-1].numpy(force=True)),
         roc_auc_score(noisy_examples, tr_leverages[-1].numpy(force=True)),
         roc_auc_score(noisy_examples, tr_leverages_loo[-1].numpy(force=True)),
         # roc_auc_score(noisy_examples, -det_schurs[-1].numpy(force=True)),
-        # roc_auc_score(noisy_examples, tr_cooks[-1].numpy(force=True)),
     )
     # )
     # %%
@@ -920,14 +991,22 @@ for i in range(args.runs):
 import matplotlib.pyplot as plt
 
 plt.scatter(
-    torch.argsort(torch.argsort(tr_self_influence_loo.sum(dim=0))).numpy(force=True),
     torch.argsort(torch.argsort(tr_self_influence.sum(dim=0))).numpy(force=True),
+    torch.argsort(torch.argsort(tr_self_influence_loo.sum(dim=0))).numpy(force=True),
     s=1,
     # c=noisy_train_set.tensors[1]
     c=noisy_examples,
 )
 plt.show()
 
+plt.scatter(
+    torch.argsort(torch.argsort(tr_leverages.sum(dim=0))).numpy(force=True),
+    torch.argsort(torch.argsort(tr_leverages_loo.sum(dim=0))).numpy(force=True),
+    s=1,
+    # c=noisy_train_set.tensors[1]
+    c=noisy_examples,
+)
+plt.show()
 # %%
 plt.scatter(
     tr_self_influence.sum(dim=0).numpy(force=True),
@@ -936,9 +1015,11 @@ plt.scatter(
 plt.axline((0, 0), slope=1)
 plt.show()
 
-# for i in range(self_influence.shape[0]):
-#     plt.scatter(tr_self_influence[i], tr_self_influence_loo[i])
-#     plt.axline((0, 0), slope=1)
-#     plt.show()
+plt.scatter(
+    tr_leverages.sum(dim=0).numpy(force=True),
+    tr_leverages_loo.sum(dim=0).numpy(force=True),
+)
+plt.axline((0, 0), slope=1)
+plt.show()
 
 # %%
