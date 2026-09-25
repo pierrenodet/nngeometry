@@ -1,12 +1,19 @@
 import pytest
 import torch
-from tasks import get_conv_gn_task, get_conv_task, get_fullyconnect_task
+from tasks import (
+    get_conv1d_task,
+    get_conv_gn_task,
+    get_conv_task,
+    get_embedding_task,
+    get_fullyconnect_task,
+    get_linear_fc_task,
+)
 
 from nngeometry import Jacobian
 from nngeometry.gram import GramMatrix
 from nngeometry.metrics import GradientSecondMoment
 from nngeometry.object.fspace import FMatDense
-from nngeometry.object.map import PFMapDense
+from nngeometry.object.map import PFMapDense, PFMapFactored
 from nngeometry.object.pspace import PMatDense
 from nngeometry.object.vector import random_fvector, random_pvector
 
@@ -68,3 +75,55 @@ def test_jacobian():
             jacobian.adjoint() @ dw
         with pytest.raises(TypeError):
             df @ jacobian.adjoint()
+
+
+def test_jacobian_factored():
+    for get_task in [
+        get_fullyconnect_task,
+        get_conv_task,
+        get_conv1d_task,
+        get_embedding_task,
+        get_linear_fc_task,
+    ]:
+        loader, lc, parameters, model, function = get_task()
+
+        jacobian = Jacobian(
+            model=model,
+            function=function,
+            loader=loader,
+            layer_collection=lc,
+            representation=PFMapDense,
+        )
+        jacobian_factored = Jacobian(
+            model=model,
+            function=function,
+            loader=loader,
+            layer_collection=lc,
+            representation=PFMapFactored,
+        )
+
+        for layer_id in lc.layers:
+            a, g = jacobian_factored.data[layer_id]
+            assert a.size(0) == jacobian.size(1)
+            assert g.shape[:2] == jacobian.size()[:2]
+            assert a.size(1) == g.size(2)
+
+            dense_values = jacobian.to_torch_layer(layer_id)
+            factored_values = jacobian_factored.to_torch_layer(layer_id)
+            for dense_value, factored_value in zip(dense_values, factored_values):
+                torch.testing.assert_close(dense_value, factored_value)
+
+        torch.testing.assert_close(jacobian.to_torch(), jacobian_factored.to_torch())
+
+
+def test_jacobian_factored_rejects_unsupported_layers():
+    loader, lc, parameters, model, function = get_conv_gn_task()
+
+    with pytest.raises(NotImplementedError):
+        Jacobian(
+            model=model,
+            function=function,
+            loader=loader,
+            layer_collection=lc,
+            representation=PFMapFactored,
+        )

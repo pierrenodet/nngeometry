@@ -18,6 +18,7 @@ from utils import angle
 from nngeometry.backend import TorchHooksJacobianBackend
 from nngeometry.layercollection import LayerCollection
 from nngeometry.maths import kronecker
+from nngeometry.object.map import PFMapDense, PFMapFactored
 from nngeometry.object.pspace import PMatBlockDiag, PMatKFAC
 from nngeometry.object.vector import PVector, random_pvector
 
@@ -303,6 +304,40 @@ def test_kfac():
         torch.testing.assert_close(
             mv_kfac.to_torch(), mv_back.to_torch(), atol=1e-3, rtol=1e-3
         )
+
+
+def test_kfac_mmap():
+    for get_task in [
+        get_fullyconnect_task,
+        get_conv_task,
+        get_conv1d_task,
+        get_embedding_task,
+    ]:
+        loader, lc, parameters, model, function = get_task()
+        generator = TorchHooksJacobianBackend(model=model, function=function)
+        kfac = PMatKFAC(
+            generator=generator, examples=loader, layer_collection=lc
+        )
+        factored_map = PFMapFactored(
+            generator=generator, examples=loader, layer_collection=lc
+        )
+        dense_map = PFMapDense(
+            layer_collection=lc,
+            data=factored_map.to_torch(),
+        )
+
+        kfac_tensor = kfac.to_torch(split_weight_bias=True)
+        expected = torch.mm(
+            dense_map.to_torch().view(-1, lc.numel()), kfac_tensor
+        ).view(*dense_map.size())
+
+        factored_result = (kfac @ factored_map.adjoint()).adjoint()
+        dense_result = (kfac @ dense_map.adjoint()).adjoint()
+
+        assert isinstance(factored_result, PFMapFactored)
+        assert isinstance(dense_result, PFMapDense)
+        torch.testing.assert_close(factored_result.to_torch(), expected)
+        torch.testing.assert_close(dense_result.to_torch(), expected)
 
 
 def test_kfac_mm():
