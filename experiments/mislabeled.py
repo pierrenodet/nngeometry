@@ -77,7 +77,7 @@ args.dataset = "mnist-1d"
 args.runs = 1
 args.regul = 1e-4
 # args.ft = True
-args.epochs = 1000
+args.epochs = 500
 args.repr = "F_kfac"
 args.competitors = True
 args.seed = 1337
@@ -93,7 +93,7 @@ torch.manual_seed(args.seed)
 transform, dataset, model_fn, optimizer_fn, classes = DATASETS[args.dataset]
 
 # model_fn = partial(model_fn, c=16)
-model_fn = partial(model_fn, c=32, h=4, d=8)
+model_fn = partial(model_fn, c=64, h=8, d=4)
 
 if transform is not None:
     if hasattr(transform, "transforms"):
@@ -198,15 +198,17 @@ for i in range(args.runs):
     records.append(record)
     # %%
     from nngeometry.object.pspace import PMatLowRank
+
     noisy_train = DataLoader(noisy_train_set, batch_size=128, shuffle=False)
 
-    args.rank = 1000
-    args.repr = "F_ekfac"
+    args.rank = 100
+    args.strategy = "one_iter_kpsvd"
+    args.repr = "F_kfac"
     if "kfac" in args.repr:
-        repr = partial(PMatKFAC, strategy="one_iter_kpsvd")
+        repr = partial(PMatKFAC, strategy=args.strategy)
         # repr = PMatKFAC
         # repr = PMatEKFAC
-        # repr = partial(PMatEKFAC, strategy="one_iter_kpsvd")
+        # repr = partial(PMatEKFAC, strategy=args.strategy)
         lc = supported_kfac_layers(LayerCollection.from_model(model))
     elif "bd" in args.repr:
         repr = PMatBlockDiag
@@ -264,52 +266,35 @@ for i in range(args.runs):
                 a *= N**0.5
                 g *= N**0.5
 
-    def qr(pfmap):
-        from nngeometry.object.fspace import FMatDense
-        from nngeometry.object.map import PFMapDense
+    # def rnystroem(A, k, regul=1e-8):
+    #     lc = A.layer_collection
 
-        sJ = pfmap.size()
+    #     # isn't there a better way ?
+    #     layerid_to_mod = lc.get_layerid_module_map(A.generator.model)
+    #     device = A.generator._check_same_device(layerid_to_mod.values())
+    #     dtype = A.generator._check_same_dtype(layerid_to_mod.values())
 
-        Q, R = torch.linalg.qr(pfmap.to_torch().view(-1, sJ[-1]).t(), mode="reduced")
-        Q = PFMapDense(pfmap.layer_collection, pfmap.generator, data=Q.t().view(*sJ))
-        R = FMatDense(
-            pfmap.layer_collection,
-            pfmap.generator,
-            data=R.view(sJ[0], sJ[1], sJ[0], sJ[1]),
-        )
-        return Q, R
-
-    from nngeometry.object.map import random_pfmap
-
-    def rnystroem(A, k, regul=1e-8):
-        lc = A.layer_collection
-
-        # isn't there a better way ?
-        layerid_to_mod = lc.get_layerid_module_map(A.generator.model)
-        device = A.generator._check_same_device(layerid_to_mod.values())
-        dtype = A.generator._check_same_dtype(layerid_to_mod.values())
-
-        S = random_pfmap(lc, (k, 1), device, dtype)
-        S, _ = qr(S)
-        Y = A @ S
-        Y = Y
-        C = S @ Y.adjoint()
-        B = C.solve(Y, regul=regul)
-        evecs, evals, _ = torch.linalg.svd(
-            B.to_torch().view(-1, B.size(-1)).t(), full_matrices=False
-        )
-        evals = torch.clamp(evals**2 - regul, min=0)
-        return evals, evecs
+    #     S = random_pfmap(lc, (k, 1), device, dtype)
+    #     S, _ = qr(S)
+    #     Y = A @ S
+    #     Y = Y
+    #     C = S @ Y.adjoint()
+    #     B = C.solve(Y, regul=regul)
+    #     evecs, evals, _ = torch.linalg.svd(
+    #         B.to_torch().view(-1, B.size(-1)).t(), full_matrices=False
+    #     )
+    #     evals = torch.clamp(evals**2 - regul, min=0)
+    #     return evals, evecs
 
     if args.rank is not None and isinstance(F, PMatLowRank):
         # _, evals, evecs = torch.svd_lowrank(
         #     F.data.view(-1, F.size(1)), q=20 + args.rank, niter=20
         # )
         # evals = evals**2
-        evals, evecs = rnystroem(F, k=args.rank)
-        evals = evals**2
-        # F.compute_eigendecomposition(impl="gram_eigh")
-        # evals, evecs = F.get_eigendecomposition()
+        # evals, evecs = rnystroem(F, k=args.rank)
+        # evals = evals**2
+        F.compute_eigendecomposition(impl="gram_eigh")
+        evals, evecs = F.get_eigendecomposition()
 
     # %%
     if args.rank is not None and isinstance(F, PMatLowRank):
@@ -327,8 +312,8 @@ for i in range(args.runs):
     # %%
     avg_lam = F.trace() / F.layer_collection.numel()
     print(avg_lam)
-    args.regul = 1e-2
-    light_noisy_noaug = DataLoader(noisy_train_set, batch_size=16, shuffle=False)
+    args.regul = 1e-4
+    light_noisy_noaug = DataLoader(noisy_train_set, batch_size=1, shuffle=False)
 
     self_influence = []
     self_influence_loo = []
@@ -338,67 +323,7 @@ for i in range(args.runs):
     cooks = []
     cache = {}
     if isinstance(F, PMatLowRank):
-        # Q, R = torch.linalg.qr(F.data.view(-1, F.size(0)).t(), mode="reduced")
-        # C = R @ R.t()
-        # U, Lc = (
-        #     Q.t(),
-        #     torch.linalg.cholesky(
-        #         C + args.regul * torch.eye(C.shape[0], device=args.device)
-        #     ),
-        # )
-        # F.compute_eigendecomposition(impl="svd")
-
         for inputs, targets in tqdm(light_noisy_noaug):
-            # pfmap_func = Jacobian(
-            #     model,
-            #     (inputs, targets),
-            #     function=func,
-            #     layer_collection=lc,
-            # )
-            # pfmap_grad = Jacobian(
-            #     model,
-            #     (inputs, targets),
-            #     function=loss,
-            #     layer_collection=lc,
-            # )
-            # G = pfmap_grad.to_torch().view(-1, pfmap_grad.size(-1))
-            # FinvG = (
-            #     torch.cholesky_solve(U @ G.t(), Lc)
-            #     .t()
-            #     .reshape(pfmap_grad.size(0), pfmap_grad.size(1), -1)
-            # )
-            # si = torch.einsum(
-            #     "onp, Onp->noO",
-            #     (U @ G.t()).t().reshape(pfmap_grad.size(0), pfmap_grad.size(1), -1),
-            #     FinvG,
-            # )
-            # J = pfmap_func.to_torch().view(-1, pfmap_func.size(-1))
-            # FinvJ = (
-            #     torch.cholesky_solve(U @ J.t(), Lc)
-            #     .t()
-            #     .reshape(pfmap_func.size(0), pfmap_func.size(1), -1)
-            # )
-            # leverage = torch.einsum(
-            #     "onp, Onp->noO",
-            #     (U @ J.t()).t().reshape(pfmap_func.size(0), pfmap_func.size(1), -1),
-            #     FinvJ,
-            # )
-            # schur = torch.eye(leverage.shape[-1], device=args.device) - leverage
-            # # print(torch.linalg.eigvalsh(schur).amin(dim=-1))
-            # cross = torch.einsum(
-            #     "onp, Onp->noO",
-            #     (U @ G.t()).t().reshape(pfmap_grad.size(0), pfmap_grad.size(1), -1),
-            #     FinvJ,
-            # )
-            # loo_effect = torch.linalg.solve(schur, cross.transpose(1, 2))
-            # self_influence.append(si)
-            # self_influence_loo.append(si + cross @ loo_effect)
-            # leverages.append(leverage)
-            # leverages_loo.append(torch.linalg.solve(schur, leverage.transpose(1, 2)))
-            # det_schurs.append(torch.logdet(schur))
-            # cooks.append(
-            #     si + cross @ loo_effect + loo_effect.transpose(1, 2) @ loo_effect
-            # )
             pfmap_func = Jacobian(
                 model,
                 (inputs, targets),
@@ -578,7 +503,7 @@ for i in range(args.runs):
             leverages_loo.append(torch.stack(leverage_loo, dim=0).detach().cpu())
             cooks.append(torch.stack(cook, dim=0).detach().cpu())
 
-    elif isinstance(F, PMatKFAC):
+    elif isinstance(F, PMatKFAC) and args.strategy == "one_iter_kpsvd":
         cache = {}
 
         def solve(A, B, scale=1.0):
@@ -720,6 +645,22 @@ for i in range(args.runs):
             self_influence_loo.append(torch.stack(si_loo, dim=0).detach().cpu())
             leverages.append(torch.stack(leverage, dim=0).detach().cpu())
             leverages_loo.append(torch.stack(leverage_loo, dim=0).detach().cpu())
+
+    elif isinstance(F, PMatKFAC) and args.strategy == "kfac":
+        cache = {}
+
+        for layer_id, layer in tqdm(lc.layers.items()):
+            a, g = F.data[layer_id]
+            trace = torch.trace(g)
+
+            if layer.transposed:
+                a, g = g, a
+
+            cache[layer_id] = {
+                "eig_a": torch.linalg.eigh(a),
+                "eig_g": torch.linalg.eigh(g),
+                "trace": trace,
+            }
 
     elif isinstance(F, PMatBlockDiag):
         cache = {}
