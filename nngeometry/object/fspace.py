@@ -137,7 +137,7 @@ class FMatDense(FMatAbstract):
         except (AttributeError, AssertionError):
             s = self.data.size()
 
-            L = torch.linalg.lu_factor(
+            L = torch.linalg.cholesky(
                 self.data.view(s[0] * s[1], s[2] * s[3])
                 + (regul * s[1])
                 * torch.eye(s[0] * s[1], device=self.data.device, dtype=self.data.dtype)
@@ -150,10 +150,7 @@ class FMatDense(FMatAbstract):
 
     def inv(self, regul=1e-8):
         s = self.data.size()
-        Minv =  torch.linalg.lu_solve(
-            *self._cholesky(regul),
-            torch.eye(s[0] * s[1], device=self.data.device, dtype=self.data.dtype),
-        )
+        Minv = torch.cholesky_inverse(self._cholesky(regul))
 
         return FMatDense(
             layer_collection=self.layer_collection,
@@ -165,7 +162,7 @@ class FMatDense(FMatAbstract):
         s = self.data.size()
         v_flat = v.to_torch().view(-1, 1)
         if solve in ["default", "solve"]:
-            solution = torch.linalg.lu_solve(*self._cholesky(regul), v_flat)
+            solution = torch.cholesky_solve(v_flat, self._cholesky(regul))
         else:
             raise NotImplementedError
 
@@ -176,7 +173,7 @@ class FMatDense(FMatAbstract):
         sJ = pfmap.size()
         J = pfmap.to_torch().view(sJ[0] * sJ[1], -1)
         if solve in ["default", "solve"]:
-            solution =  torch.linalg.lu_solve(*self._cholesky(regul), J)
+            solution = torch.cholesky_solve(J, self._cholesky(regul))
         else:
             raise NotImplementedError
 

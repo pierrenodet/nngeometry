@@ -2,6 +2,7 @@ import math
 import warnings
 from abc import ABC, abstractmethod
 from collections import OrderedDict, defaultdict
+from functools import lru_cache
 
 import torch
 
@@ -14,7 +15,7 @@ from nngeometry.layercollection import (
     LinearLayer,
 )
 from nngeometry.maths import kronecker
-from nngeometry.object.map import PFMap, PFMapDense
+from nngeometry.object.map import PFMap, PFMapAdjoint, PFMapDense
 from nngeometry.object.vector import PVector
 from nngeometry.solve import block_cg, cg, lanczos
 
@@ -87,13 +88,13 @@ class PMatAbstract(ABC):
             layer_collection=pfmap.layer_collection,
         )
 
-    def __matmul__(self, x):
-        if isinstance(x, PVector):
-            return self.mv(x)
-        elif isinstance(x, PFMap):
-            return self.mmap(x)
+    def __matmul__(self, other):
+        if isinstance(other, PVector):
+            return self.mv(other)
+        elif isinstance(other, PFMapAdjoint):
+            return self.mmap(other.adjoint()).adjoint()
         else:
-            raise NotImplementedError("`x` should be an instance of PVector or PFMap")
+            return NotImplemented
 
     @abstractmethod
     def get_device(self):
@@ -784,6 +785,17 @@ class PMatKFAC(PMatAbstract):
 
     def __pow__(self, pow):
         return self.pow(pow)
+
+    def __rmul__(self, other):
+        rmul_data = dict()
+        for layer_id, layer in self.layer_collection.layers.items():
+            a, g = self.data[layer_id]
+            rmul_data[layer_id] = (other**0.5 * a, other**0.5 * g)
+        return PMatKFAC(
+            generator=self.generator,
+            data=rmul_data,
+            layer_collection=self.layer_collection,
+        )
 
     def solvePVec(self, x, regul=1e-8, solve="default", use_pi=True):
         if solve != "default":

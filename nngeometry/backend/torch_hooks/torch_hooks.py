@@ -333,6 +333,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
                 self._buffer["blocks"][layer_id][1].div_(n_output**0.5)
 
             elif strategy == "one_iter_kpsvd":
+                # 3.1.2 in https://arxiv.org/pdf/2406.17748v1
                 tr = torch.trace(self._buffer["blocks"][layer_id][1])
                 self._buffer["blocks"][layer_id][0].div_(tr**0.5)
                 self._buffer["blocks"][layer_id][1].div_(tr**0.5)
@@ -605,6 +606,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
 
             f_output = self.function(*d).view(bs, -1)
             n_output = f_output.size(-1)
+            pseudo_loss = 0
             for i in range(n_output):
                 # TODO reuse instead of reallocating memory
                 self._buffer["Jv"] = torch.zeros((1, bs), device=device, dtype=dtype)
@@ -616,16 +618,17 @@ class TorchHooksJacobianBackend(AbstractBackend):
                     retain_graph=True,
                     only_inputs=True,
                 )
-                self._buffer["compute_switch"] = False
-                pseudo_loss = torch.dot(self._buffer["Jv"][0, :], f_output[:, i])
-                grads = torch.autograd.grad(
-                    pseudo_loss,
-                    parameters,
-                    retain_graph=i < n_output - 1,
-                    only_inputs=True,
-                )
-                for i_p, p in enumerate(parameters):
-                    output[p].add_(grads[i_p])
+                pseudo_loss += torch.dot(self._buffer["Jv"][0, :], f_output[:, i])
+
+            self._buffer["compute_switch"] = False
+            grads = torch.autograd.grad(
+                pseudo_loss,
+                parameters,
+                retain_graph=False,
+                only_inputs=True,
+            )
+            for i_p, p in enumerate(parameters):
+                output[p].add_(grads[i_p])
 
         output_dict = dict()
         for layer_id, layer in layer_collection.layers.items():
