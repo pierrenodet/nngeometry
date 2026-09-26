@@ -165,12 +165,10 @@ class LinearJacobianFactory(JacobianFactory):
 
     @classmethod
     def kfac_gg(cls, buffer, mod, layer, x, gy):
-        spatial_locations = 1
         if gy.ndim == 3:
-            spatial_locations = gy.size(1)
             gy = gy.reshape(-1, gy.size(-1))
 
-        buffer.add_(torch.mm(gy.t(), gy)) / spatial_locations
+        buffer.add_(torch.mm(gy.t(), gy))
 
     @classmethod
     def kfe_diag(cls, buffer, mod, layer, x, gy, evecs_a, evecs_g):
@@ -272,11 +270,10 @@ class Conv2dJacobianFactory(JacobianFactory):
 
     @classmethod
     def kfac_gg(cls, buffer, mod, layer, x, gy):
-        spatial_locations = gy.size(2) * gy.size(3)
         os = gy.size(1)
         # DS_tilda in KFC
         DS_tilda = gy.permute(0, 2, 3, 1).contiguous().view(-1, os)
-        buffer.add_(torch.mm(DS_tilda.t(), DS_tilda) / spatial_locations)
+        buffer.add_(torch.mm(DS_tilda.t(), DS_tilda))
 
     @classmethod
     def kfe_diag(cls, buffer, mod, layer, x, gy, evecs_a, evecs_g):
@@ -571,11 +568,10 @@ class Conv1dJacobianFactory(JacobianFactory):
 
     @classmethod
     def kfac_gg(cls, buffer, mod, layer, x, gy):
-        spatial_locations = gy.size(2)
         os = gy.size(1)
         # DS_tilda in KFC
         DS_tilda = gy.permute(0, 2, 1).contiguous().view(-1, os)
-        buffer.add_(torch.mm(DS_tilda.t(), DS_tilda) / spatial_locations)
+        buffer.add_(torch.mm(DS_tilda.t(), DS_tilda))
 
     @classmethod
     def kfe_diag(cls, buffer, mod, layer, x, gy, evecs_a, evecs_g):
@@ -663,11 +659,10 @@ class EmbeddingJacobianFactory(JacobianFactory):
     @classmethod
     def kfac_gg(cls, buffer, mod, layer, x, gy):
         # this uses the same suming and scaling as KFC
-        spatial_locations = gy.size(1)
         os = gy.size(2)
         # DS_tilda in KFC
         gy = gy.view(-1, os)
-        buffer.add_(torch.mm(gy.t(), gy) / spatial_locations)
+        buffer.add_(torch.mm(gy.t(), gy))
 
     @classmethod
     def kfac_xx(cls, buffer, mod, layer, x, gy):
