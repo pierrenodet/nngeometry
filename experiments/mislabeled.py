@@ -52,7 +52,7 @@ from nngeometry.backend import TorchHooksJacobianBackend
 from nngeometry.jacobian import Jacobian
 from nngeometry.layercollection import LayerCollection
 from nngeometry.metrics import FIM, FIM_MonteCarlo
-from nngeometry.object.map import random_pfmap
+from nngeometry.object.map import PFMapFactored, random_pfmap
 from nngeometry.object.pspace import PMatBlockDiag, PMatDense, PMatEKFAC, PMatKFAC
 from nngeometry.object.vector import FVector
 
@@ -83,7 +83,7 @@ args.competitors = True
 args.seed = 1337
 args.ft = False
 args.output_dir = "mislabeled-output"
-args.device = "mps"
+args.device = "cuda"
 
 
 os.makedirs(args.output_dir, exist_ok=True)
@@ -202,7 +202,7 @@ for i in range(args.runs):
     noisy_train = DataLoader(noisy_train_set, batch_size=128, shuffle=False)
 
     args.rank = 100
-    args.strategy = "one_iter_kpsvd"
+    args.strategy = "kfac"
     args.repr = "F_kfac"
     if "kfac" in args.repr:
         repr = partial(PMatKFAC, strategy=args.strategy)
@@ -262,9 +262,9 @@ for i in range(args.runs):
             F = N * F
         else:  # kfac
             for layer_id, layer in tqdm(lc.layers.items()):
-                a, g = F.data[layer_id]
-                a *= N**0.5
-                g *= N**0.5
+                A, G = F.data[layer_id]
+                A *= N**0.5
+                G *= N**0.5
 
     # def rnystroem(A, k, regul=1e-8):
     #     lc = A.layer_collection
@@ -310,10 +310,12 @@ for i in range(args.runs):
         F.evals = lr_evals
         F.evecs = lr_evecs
     # %%
+    from nngeometry.object.map import PFMapDense
+
     avg_lam = F.trace() / F.layer_collection.numel()
     print(avg_lam)
     args.regul = 1e-4
-    light_noisy_noaug = DataLoader(noisy_train_set, batch_size=1, shuffle=False)
+    light_noisy_noaug = DataLoader(noisy_train_set, batch_size=32, shuffle=False)
 
     self_influence = []
     self_influence_loo = []
@@ -543,15 +545,15 @@ for i in range(args.runs):
             return FinvG + correction
 
         for layer_id, layer in tqdm(lc.layers.items()):
-            a, g = F.data[layer_id]
-            trace = torch.trace(g)
+            A, G = F.data[layer_id]
+            trace = torch.trace(G)
 
             if layer.transposed:
-                a, g = g, a
+                A, G = G, A
 
             cache[layer_id] = {
-                "eig_a": torch.linalg.eigh(a),
-                "eig_g": torch.linalg.eigh(g),
+                "eig_a": torch.linalg.eigh(A),
+                "eig_g": torch.linalg.eigh(G),
                 "trace": trace,
             }
 
@@ -650,17 +652,133 @@ for i in range(args.runs):
         cache = {}
 
         for layer_id, layer in tqdm(lc.layers.items()):
-            a, g = F.data[layer_id]
-            trace = torch.trace(g)
+            A, G = F.data[layer_id]
 
-            if layer.transposed:
-                a, g = g, a
+            A = A + args.regul**0.5 * torch.eye(
+                A.shape[0], device=A.device, dtype=A.dtype
+            )
+            G = G + args.regul**0.5 * torch.eye(
+                G.shape[0], device=G.device, dtype=G.dtype
+            )
 
             cache[layer_id] = {
-                "eig_a": torch.linalg.eigh(a),
-                "eig_g": torch.linalg.eigh(g),
-                "trace": trace,
+                "LA": torch.linalg.cholesky(A),
+                "LG": torch.linalg.cholesky(G),
             }
+
+            def solve(A, b):
+                return torch.cholesky_solve(b, A)
+
+        for inputs, targets in tqdm(light_noisy_noaug):
+            si = []
+            si_loo = []
+            leverage = []
+            leverage_loo = []
+            cook = []
+            pfmap_func = Jacobian(
+                model,
+                (inputs, targets),
+                function=func,
+                layer_collection=lc,
+                representation=PFMapFactored,
+            )
+            pfmap_grad = Jacobian(
+                model,
+                (inputs, targets),
+                function=loss,
+                layer_collection=lc,
+                representation=PFMapFactored,
+            )
+            for layer_id, layer in lc.layers.items():
+                Ga, Gg = pfmap_grad.data[layer_id]
+                Ja, Jg = pfmap_func.data[layer_id]
+
+                si_g = torch.einsum(
+                    "onij, Onij->noO",
+                    Gg,
+                    solve(cache[layer_id]["LG"], Gg.transpose(-1, -2)).transpose(
+                        -1, -2
+                    ),
+                )
+                si_a = torch.einsum(
+                    "nij, nij->n",
+                    Ga,
+                    solve(cache[layer_id]["LA"], Ga.transpose(-1, -2)).transpose(
+                        -1, -2
+                    ),
+                )[..., None, None]
+                si.append(si_a * si_g)
+
+                leverage_g = torch.einsum(
+                    "onij, Onij->noO",
+                    Jg,
+                    solve(cache[layer_id]["LG"], Jg.transpose(-1, -2)).transpose(
+                        -1, -2
+                    ),
+                )
+                leverage_a = si_a
+                # print(
+                #     leverage_a.squeeze(), torch.linalg.eigvalsh(leverage_g).amin(dim=-1)
+                # )
+                leverage.append(leverage_a * leverage_g)
+
+                schur_g = (
+                    torch.eye(
+                        leverage_g.shape[-1],
+                        device=leverage_g.device,
+                        dtype=leverage_g.dtype,
+                    )
+                    - leverage_g
+                )
+                schur_a = (
+                    torch.eye(
+                        leverage_a.shape[-1],
+                        device=leverage_a.device,
+                        dtype=leverage_a.dtype,
+                    )
+                    - leverage_a
+                )
+
+                si_loo_a = si_a / (1 - si_a)
+                cross_g = torch.einsum(
+                    "onij, Onij->noO",
+                    Gg,
+                    solve(cache[layer_id]["LG"], Jg.transpose(-1, -2)).transpose(
+                        -1, -2
+                    ),
+                )
+                si_loo_g = cross_g @ torch.linalg.solve(
+                    schur_g, cross_g.transpose(-1, -2)
+                )
+                si_loo.append((si_a + si_loo_a) * (si_g + si_loo_g))
+
+                leverage_loo_a = si_loo_a
+                leverage_loo_g = torch.linalg.solve(
+                    schur_g, leverage_g.transpose(-1, -2)
+                )
+                leverage_loo.append(leverage[-1] + leverage_loo_a * leverage_loo_g)
+
+                # if layer.has_bias():
+                #     G = pfmap_grad.to_torch_layer(layer_id)
+                #     sG = G[0].size()
+                #     Gw = G[0].reshape(sG[0], sG[1], sG[2], -1)
+                #     G = torch.cat([Gw, G[1].unsqueeze(-1)], dim=-1)
+                # else:
+                #     G = pfmap_grad.to_torch_layer(layer_id)
+                #     sG = G[0].size()
+                #     G = G[0].reshape(sG[0], sG[1], sG[2], -1)
+
+                # solve_g = solve(cache[layer_id]["Lg"], G)
+                # solve_ga = solve(
+                #     cache[layer_id]["La"], solve_g.transpose(-1, -2)
+                # ).transpose(-1, -2)
+                # si.append(torch.einsum("onij, Onij->noO", G, solve_ga))
+
+            self_influence.append(torch.stack(si, dim=0).detach().cpu())
+            self_influence_loo.append(torch.stack(si_loo, dim=0).detach().cpu())
+            leverages.append(torch.stack(leverage, dim=0).detach().cpu())
+            leverages_loo.append(torch.stack(leverage_loo, dim=0).detach().cpu())
+            # cooks.append(torch.stack(cook, dim=0).detach().cpu())
 
     elif isinstance(F, PMatBlockDiag):
         cache = {}
@@ -801,15 +919,15 @@ for i in range(args.runs):
         self_influence_loo = torch.cat(self_influence_loo, dim=0)[None, ...]
         leverages = torch.cat(leverages, dim=0)[None, ...]
         leverages_loo = torch.cat(leverages_loo, dim=0)[None, ...]
-        cooks = torch.cat(cooks, dim=0)[None, ...]
-        det_schurs = torch.cat(det_schurs, dim=0)[None, ...]
+        # cooks = torch.cat(cooks, dim=0)[None, ...]
+        # det_schurs = torch.cat(det_schurs, dim=0)[None, ...]
     else:
         self_influence = torch.cat(self_influence, dim=1)
         self_influence_loo = torch.cat(self_influence_loo, dim=1)
         leverages = torch.cat(leverages, dim=1)
         leverages_loo = torch.cat(leverages_loo, dim=1)
-        cooks = torch.cat(cooks, dim=1)
-        det_schurs = torch.cat(det_schurs, dim=1)
+        # cooks = torch.cat(cooks, dim=1)
+        # det_schurs = torch.cat(det_schurs, dim=1)
 
     # %%
     losses = []
