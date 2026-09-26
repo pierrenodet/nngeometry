@@ -109,12 +109,13 @@ DATASETS = {
         #     nesterov=True,
         # ),
         lambda outputs=10, c=64, h=4, d=2, k=9: nn.Sequential(
+            nn.Unflatten(-1, (1, -1)),
+            nn.Conv1d(1, c, kernel_size=9, padding=9 // 2),
+            nn.GELU(),
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(c, c),
             # nn.Unflatten(-1, (1, -1)),
-            # nn.Conv1d(1, c, kernel_size=9, padding=9 // 2),
-            # nn.GELU(),
-            # nn.AdaptiveAvgPool1d(1),
-            # nn.Flatten(),
-            # nn.Linear(c, c),
             # nn.Conv1d(1, c, kernel_size=k, padding=k // 2),
             # nn.GELU(),
             # nn.MaxPool1d(2),  # 28 -> 14, first bit of real invariance
@@ -123,7 +124,7 @@ DATASETS = {
             # nn.AdaptiveAvgPool1d(1),  # global pool -> true shift invariance
             # nn.Flatten(),
             # nn.Linear(c * 2, c),
-            nn.Linear(28, c),
+            # nn.Linear(28, c),
             *[
                 Residuals(
                     nn.Sequential(

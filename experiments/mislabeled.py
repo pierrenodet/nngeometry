@@ -260,11 +260,11 @@ for i in range(args.runs):
     if not isinstance(F, FMatDense):
         if hasattr(F, "__rmul__"):
             F = N * F
-        else:  # kfac
-            for layer_id, layer in tqdm(lc.layers.items()):
-                A, G = F.data[layer_id]
-                A *= N**0.5
-                G *= N**0.5
+    if isinstance(F, PMatKFAC) and args.strategy == "kfac":  # kfac
+        for layer_id, layer in tqdm(lc.layers.items()):
+            A, G = F.data[layer_id]
+            A /= len(classes) ** 0.5
+            G *= len(classes) ** 0.5
 
     # def rnystroem(A, k, regul=1e-8):
     #     lc = A.layer_collection
@@ -693,86 +693,70 @@ for i in range(args.runs):
                 Ga, Gg = pfmap_grad.data[layer_id]
                 Ja, Jg = pfmap_func.data[layer_id]
 
-                si_g = torch.einsum(
-                    "onij, Onij->noO",
-                    Gg,
-                    solve(cache[layer_id]["LG"], Gg.transpose(-1, -2)).transpose(
-                        -1, -2
-                    ),
-                )
-                si_a = torch.einsum(
-                    "nij, nij->n",
-                    Ga,
-                    solve(cache[layer_id]["LA"], Ga.transpose(-1, -2)).transpose(
-                        -1, -2
-                    ),
-                )[..., None, None]
-                si.append(si_a * si_g)
-
-                leverage_g = torch.einsum(
-                    "onij, Onij->noO",
-                    Jg,
-                    solve(cache[layer_id]["LG"], Jg.transpose(-1, -2)).transpose(
-                        -1, -2
-                    ),
-                )
-                leverage_a = si_a
-                # print(
-                #     leverage_a.squeeze(), torch.linalg.eigvalsh(leverage_g).amin(dim=-1)
+                # si_g = torch.einsum(
+                #     "onij, Onij->noOij",
+                #     Gg,
+                #     solve(cache[layer_id]["LG"], Gg.transpose(-1, -2)).transpose(
+                #         -1, -2
+                #     ),
                 # )
-                leverage.append(leverage_a * leverage_g)
-
-                schur_g = (
-                    torch.eye(
-                        leverage_g.shape[-1],
-                        device=leverage_g.device,
-                        dtype=leverage_g.dtype,
-                    )
-                    - leverage_g
-                )
-                schur_a = (
-                    torch.eye(
-                        leverage_a.shape[-1],
-                        device=leverage_a.device,
-                        dtype=leverage_a.dtype,
-                    )
-                    - leverage_a
-                )
-
-                si_loo_a = si_a / (1 - si_a)
-                cross_g = torch.einsum(
-                    "onij, Onij->noO",
-                    Gg,
-                    solve(cache[layer_id]["LG"], Jg.transpose(-1, -2)).transpose(
-                        -1, -2
+                si_a = Ga * solve(
+                    cache[layer_id]["LA"], Ga.transpose(-1, -2)
+                ).transpose(-1, -2)
+                si.append(
+                    torch.einsum(
+                        "onsj, Onsj, nsk ->noO",
+                        Gg,
+                        solve(cache[layer_id]["LG"], Gg.transpose(-1, -2)).transpose(
+                            -1, -2
+                        ),
+                        si_a,
                     ),
                 )
-                si_loo_g = cross_g @ torch.linalg.solve(
-                    schur_g, cross_g.transpose(-1, -2)
+
+                leverage.append(
+                    torch.einsum(
+                        "onsj, Onsj, nsk->noO",
+                        Jg,
+                        solve(cache[layer_id]["LG"], Jg.transpose(-1, -2)).transpose(
+                            -1, -2
+                        ),
+                        si_a,
+                    ),
                 )
-                si_loo.append((si_a + si_loo_a) * (si_g + si_loo_g))
 
-                leverage_loo_a = si_loo_a
-                leverage_loo_g = torch.linalg.solve(
-                    schur_g, leverage_g.transpose(-1, -2)
-                )
-                leverage_loo.append(leverage[-1] + leverage_loo_a * leverage_loo_g)
+                si_loo.append(si[-1])
+                leverage_loo.append(leverage[-1])
 
-                # if layer.has_bias():
-                #     G = pfmap_grad.to_torch_layer(layer_id)
-                #     sG = G[0].size()
-                #     Gw = G[0].reshape(sG[0], sG[1], sG[2], -1)
-                #     G = torch.cat([Gw, G[1].unsqueeze(-1)], dim=-1)
-                # else:
-                #     G = pfmap_grad.to_torch_layer(layer_id)
-                #     sG = G[0].size()
-                #     G = G[0].reshape(sG[0], sG[1], sG[2], -1)
+                # si_loo_a = si_a / (1 - si_a)
 
-                # solve_g = solve(cache[layer_id]["Lg"], G)
-                # solve_ga = solve(
-                #     cache[layer_id]["La"], solve_g.transpose(-1, -2)
-                # ).transpose(-1, -2)
-                # si.append(torch.einsum("onij, Onij->noO", G, solve_ga))
+                # schur_g = (
+                #     torch.eye(
+                #         leverage_g.shape[-1],
+                #         device=leverage_g.device,
+                #         dtype=leverage_g.dtype,
+                #     )
+                #     - leverage_g
+                # )
+                # cross_g = torch.einsum(
+                #     "onij, Onij->noO",
+                #     Gg,
+                #     solve(cache[layer_id]["LG"], Jg.transpose(-1, -2)).transpose(
+                #         -1, -2
+                #     ),
+                # )
+                # si_loo_g = cross_g @ torch.linalg.solve(
+                #     schur_g, cross_g.transpose(-1, -2)
+                # )
+                # si_loo.append((si_a + si_loo_a) * (si_g + si_loo_g))
+
+                # leverage_loo_a = si_loo_a
+                # leverage_loo_g = torch.linalg.solve(
+                #     schur_g, leverage_g.transpose(-1, -2)
+                # )
+                # leverage_loo.append(
+                #     (leverage_a + leverage_loo_a) * (leverage_g + leverage_loo_g)
+                # )
 
             self_influence.append(torch.stack(si, dim=0).detach().cpu())
             self_influence_loo.append(torch.stack(si_loo, dim=0).detach().cpu())
