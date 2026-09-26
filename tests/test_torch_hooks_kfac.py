@@ -146,10 +146,11 @@ def test_torch_hooks_kfac_vs_pblockdiag():
     Compares blockdiag and kfac representation on datasets/architectures
     where they are the same
     """
-    for get_task, mult in zip(
-        [get_conv1dnet_kfc_task, get_convnet_kfc_task, get_fullyconnect_kfac_task],
-        [3.0, 15.0, 1.0],
-    ):
+    for get_task in [
+        get_conv1dnet_kfc_task,
+        get_convnet_kfc_task,
+        get_fullyconnect_kfac_task,
+    ]:
         print(get_task)
         loader, lc, parameters, model, function = get_task()
 
@@ -164,7 +165,7 @@ def test_torch_hooks_kfac_vs_pblockdiag():
 
         G_kfac = M_kfac.to_torch(split_weight_bias=True)
         G_blockdiag = M_blockdiag.to_torch()
-        torch.testing.assert_close(G_blockdiag, G_kfac * mult)
+        torch.testing.assert_close(G_blockdiag, G_kfac)
 
 
 def test_one_iter_kpsvd_vs_pblockdiag():
@@ -172,10 +173,11 @@ def test_one_iter_kpsvd_vs_pblockdiag():
     Compares blockdiag and kfac representation on datasets/architectures
     where they are the same
     """
-    for get_task, mult in zip(
-        [get_conv1dnet_kfc_task, get_convnet_kfc_task, get_fullyconnect_kfac_task],
-        [3.0, 15.0, 1.0],
-    ):
+    for get_task in [
+        get_conv1dnet_kfc_task,
+        get_convnet_kfc_task,
+        get_fullyconnect_kfac_task,
+    ]:
         loader, lc, parameters, model, function = get_task()
 
         generator = TorchHooksJacobianBackend(
@@ -315,9 +317,7 @@ def test_kfac_mmap():
     ]:
         loader, lc, parameters, model, function = get_task()
         generator = TorchHooksJacobianBackend(model=model, function=function)
-        kfac = PMatKFAC(
-            generator=generator, examples=loader, layer_collection=lc
-        )
+        kfac = PMatKFAC(generator=generator, examples=loader, layer_collection=lc)
         factored_map = PFMapFactored(
             generator=generator, examples=loader, layer_collection=lc
         )
