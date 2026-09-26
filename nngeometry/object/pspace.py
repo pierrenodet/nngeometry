@@ -15,7 +15,7 @@ from nngeometry.layercollection import (
     LinearLayer,
 )
 from nngeometry.maths import kronecker
-from nngeometry.object.map import PFMap, PFMapAdjoint, PFMapDense
+from nngeometry.object.map import PFMap, PFMapAdjoint, PFMapDense, PFMapFactored
 from nngeometry.object.vector import PVector
 from nngeometry.solve import block_cg, cg, lanczos
 
@@ -927,6 +927,64 @@ class PMatKFAC(PMatAbstract):
                 mv_tuple = (mv.view(*sw),)
             out_dict[layer_id] = mv_tuple
         return PVector(layer_collection=vs.layer_collection, dict_repr=out_dict)
+
+    def mmap(self, pfmap):
+        if isinstance(pfmap, PFMapFactored):
+            out_dict = dict()
+            for layer_id, layer in pfmap.layer_collection.layers.items():
+                a, g = pfmap.data[layer_id]
+                sa = a.size()
+                sg = g.size()
+                A, G = self.data[layer_id]
+                if layer.transposed:
+                    a = torch.mm(a.view(-1, sa[-1]), A.t())
+                    g = torch.mm(g.view(-1, sg[-1]), G)
+                else:
+                    a = torch.mm(a.view(-1, sa[-1]), A)
+                    g = torch.mm(g.view(-1, sg[-1]), G.t())
+                out_dict[layer_id] = (a.view(*sa), g.view(*sg))
+
+            return PFMapFactored(
+                generator=self.generator,
+                data=out_dict,
+                layer_collection=pfmap.layer_collection,
+            )
+        elif isinstance(pfmap, PFMapDense):
+            out_dict = dict()
+            for layer_id, layer, values in pfmap.iter_by_layer():
+                w = values[0]
+                sw = w.size()
+                v = w.view(sw[0] * sw[1], sw[2], -1)
+                if layer.has_bias():
+                    b = values[1]
+                    sb = b.size()
+                    v = torch.cat([v, b.view(sw[0] * sw[1], sw[2], 1)], dim=2)
+
+                A, G = self.data[layer_id]
+                if layer.transposed:
+                    A, G = G, A
+
+                sv = v.size()
+                v = v.permute(1, 0, 2)
+                v = torch.mm(G, v.contiguous().view(sv[1], -1))
+                v = v.view(sv[1], sv[0], sv[2]).permute(1, 0, 2)
+                v = torch.mm(v.contiguous().view(-1, sv[2]), A).view(*sv)
+
+                if layer.has_bias():
+                    out_dict[layer_id] = (
+                        v[:, :, :-1].contiguous().view(*sw),
+                        v[:, :, -1].contiguous().view(*sb),
+                    )
+                else:
+                    out_dict[layer_id] = (v.view(*sw),)
+
+            return PFMapDense.from_dict(
+                generator=self.generator,
+                data_dict=out_dict,
+                layer_collection=pfmap.layer_collection,
+            )
+        else:
+            return super().mmap(pfmap)
 
     def vTMv(self, vector):
         vector_dict = vector.to_dict()

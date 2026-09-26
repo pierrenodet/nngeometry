@@ -143,6 +143,19 @@ class LinearJacobianFactory(JacobianFactory):
             buffer.add_((gy**2).sum())
 
     @classmethod
+    def activations(cls, mod, layer, x):
+        bs, xs = x.size(0), x.size(-1)
+        a = x.view(bs, -1, xs)
+        if layer.has_bias():
+            a = torch.cat([a, torch.ones_like(a[:, :, :1])], dim=2)
+        return a
+
+    @classmethod
+    def output_derivatives(cls, mod, layer, gy):
+        bs, os = gy.size(0), gy.size(-1)
+        return gy.view(bs, -1, os)
+
+    @classmethod
     def kfac_xx(cls, buffer, mod, layer, x, gy):
         if x.ndim == 3:
             x = x.reshape(-1, x.size(-1))
@@ -221,6 +234,23 @@ class Conv2dJacobianFactory(JacobianFactory):
         buffer.add_((gy * gy2).sum(dim=(1, 2, 3)))
         if layer.has_bias():
             buffer.add_(torch.mv(gy.sum(dim=(2, 3)), v_bias))
+
+    @classmethod
+    def activations(cls, mod, layer, x):
+        a = F.unfold(
+            x,
+            kernel_size=mod.kernel_size,
+            stride=mod.stride,
+            padding=mod.padding,
+            dilation=mod.dilation,
+        ).transpose(1, 2)
+        if layer.has_bias():
+            a = torch.cat([a, torch.ones_like(a[:, :, :1])], dim=2)
+        return a
+
+    @classmethod
+    def output_derivatives(cls, mod, layer, gy):
+        return gy.flatten(2).transpose(1, 2)
 
     @classmethod
     def kfac_xx(cls, buffer, mod, layer, x, gy):
@@ -505,6 +535,23 @@ class Conv1dJacobianFactory(JacobianFactory):
             buffer.add_(torch.mv(gy.sum(dim=2), v_bias))
 
     @classmethod
+    def activations(cls, mod, layer, x):
+        a = F.unfold(
+            x.unsqueeze(2),
+            kernel_size=(1, mod.kernel_size[0]),
+            stride=(1, mod.stride[0]),
+            padding=(0, mod.padding[0]),
+            dilation=(1, mod.dilation[0]),
+        ).transpose(1, 2)
+        if layer.has_bias():
+            a = torch.cat([a, torch.ones_like(a[:, :, :1])], dim=2)
+        return a
+
+    @classmethod
+    def output_derivatives(cls, mod, layer, gy):
+        return gy.transpose(1, 2)
+
+    @classmethod
     def kfac_xx(cls, buffer, mod, layer, x, gy):
         ks = (1, mod.weight.size(2))
         # A_tilda in KFC
@@ -601,6 +648,17 @@ class EmbeddingJacobianFactory(JacobianFactory):
         buffer[:, :w_numel].add_(
             torch.bmm(x_onehot.transpose(1, 2).to(gy.dtype), gy).view(x_s[0], -1)
         )
+
+    @classmethod
+    def activations(cls, mod, layer, x):
+        check_embedding_arguments(mod)
+        return F.one_hot(x.view(x.size(0), -1), num_classes=layer.num_embeddings).to(
+            mod.weight.dtype
+        )
+
+    @classmethod
+    def output_derivatives(cls, mod, layer, gy):
+        return gy.view(gy.size(0), -1, layer.embedding_dim)
 
     @classmethod
     def kfac_gg(cls, buffer, mod, layer, x, gy):
