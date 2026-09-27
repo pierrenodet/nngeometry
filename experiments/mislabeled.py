@@ -544,7 +544,7 @@ for i in range(args.runs):
                     L, x.transpose(-1, -2), upper=False
                 ).transpose(-1, -2)
 
-        def woodburry_solve(U, b):
+        def woodbury_solve(U, b):
             if U.size(-1) <= U.size(-2):
                 schur = -(U.transpose(-1, -2) @ U)
                 schur.diagonal(dim1=-2, dim2=-1).add_(1)
@@ -605,7 +605,7 @@ for i in range(args.runs):
                     )
                 )
 
-                Ga_w_loo = woodburry_solve(Ja_w, Ga_w)
+                Ga_w_loo = woodbury_solve(Ja_w, Ga_w)
                 Ja_w_loo = Ga_w_loo
                 Gg_w_flat = Gg_w.permute(1, 0, 2, 3).reshape(
                     Gg_w.size(1), -1, Gg_w.size(3)
@@ -613,7 +613,7 @@ for i in range(args.runs):
                 Jg_w_flat = Jg_w.permute(1, 0, 2, 3).reshape(
                     Jg_w.size(1), -1, Jg_w.size(3)
                 )
-                Gg_w_loo_flat, Jg_w_loo_flat = woodburry_solve(
+                Gg_w_loo_flat, Jg_w_loo_flat = woodbury_solve(
                     Jg_w_flat,
                     torch.cat((Gg_w_flat, Jg_w_flat), dim=1),
                 ).split((Gg_w_flat.size(1), Jg_w_flat.size(1)), dim=1)
