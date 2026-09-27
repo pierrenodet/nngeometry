@@ -73,17 +73,20 @@ parser.add_argument("--correction_ratio", type=float, default=0.15)
 
 args = parser.parse_args()
 
-args.dataset = "mnist-1d"
+args.dataset = "fashion-mnist"
 args.runs = 1
 args.regul = 1e-4
 # args.ft = True
-args.epochs = 500
+args.epochs = 1
 args.repr = "F_kfac"
 args.competitors = True
 args.seed = 1337
 args.ft = False
 args.output_dir = "mislabeled-output"
 args.device = "cuda"
+args.rank = 1000
+args.use_pi = True
+args.strategy = "kfac"
 
 
 os.makedirs(args.output_dir, exist_ok=True)
@@ -93,7 +96,7 @@ torch.manual_seed(args.seed)
 transform, dataset, model_fn, optimizer_fn, classes = DATASETS[args.dataset]
 
 # model_fn = partial(model_fn, c=16)
-model_fn = partial(model_fn, c=1024, h=1, d=4)
+# model_fn = partial(model_fn, c=2048, h=2, d=4)
 
 if transform is not None:
     if hasattr(transform, "transforms"):
@@ -201,15 +204,13 @@ for i in range(args.runs):
 
     noisy_train = DataLoader(noisy_train_set, batch_size=128, shuffle=False)
 
-    args.rank = 100
-    args.strategy = "kfac"
     args.use_pi = True
     args.repr = "F_kfac"
-    if "kfac" in args.repr:
+    if "ekfac" in args.repr:
+        repr = partial(PMatEKFAC, strategy=args.strategy)
+        lc = supported_kfac_layers(LayerCollection.from_model(model))
+    elif "kfac" in args.repr:
         repr = partial(PMatKFAC, strategy=args.strategy)
-        # repr = PMatKFAC
-        # repr = PMatEKFAC
-        # repr = partial(PMatEKFAC, strategy=args.strategy)
         lc = supported_kfac_layers(LayerCollection.from_model(model))
     elif "bd" in args.repr:
         repr = PMatBlockDiag
@@ -263,9 +264,9 @@ for i in range(args.runs):
             F = N * F
     if isinstance(F, PMatKFAC) and args.strategy == "kfac":  # kfac
         for layer_id, layer in tqdm(lc.layers.items()):
-            A, G = F.data[layer_id]
+            A, G_w = F.data[layer_id]
             A /= (len(classes) - 1) ** 0.5
-            G *= (len(classes) - 1) ** 0.5
+            G_w *= (len(classes) - 1) ** 0.5
 
     # def rnystroem(A, k, regul=1e-8):
     #     lc = A.layer_collection
@@ -315,8 +316,9 @@ for i in range(args.runs):
 
     avg_lam = F.trace() / F.layer_collection.numel()
     print(avg_lam)
-    args.regul = 1e-4
-    light_noisy_noaug = DataLoader(noisy_train_set, batch_size=32, shuffle=False)
+    args.regul = 1e-8
+    args.use_pi = True
+    light_noisy_noaug = DataLoader(noisy_train_set, batch_size=8, shuffle=False)
 
     self_influence = []
     self_influence_loo = []
@@ -444,10 +446,10 @@ for i in range(args.runs):
                 # Jkfe = torch.einsum("nc,cnij->cnij", torch.sqrt(p), Jlkfe_centered)
                 # Gkfe = torch.einsum("nc, cnij->nij", p - y, Jlkfe).unsqueeze(0)
 
-                J = pfmap_func.to_torch_layer(layer_id)
-                Jkfe = F._proj_to_kfe_batched(J, evecs[layer_id], layer)
-                G = pfmap_grad.to_torch_layer(layer_id)
-                Gkfe = F._proj_to_kfe_batched(G, evecs[layer_id], layer)
+                J_w = pfmap_func.to_torch_layer(layer_id)
+                Jkfe = F._proj_to_kfe_batched(J_w, evecs[layer_id], layer)
+                G_w = pfmap_grad.to_torch_layer(layer_id)
+                Gkfe = F._proj_to_kfe_batched(G_w, evecs[layer_id], layer)
 
                 sG = Gkfe.size()
 
@@ -506,149 +508,6 @@ for i in range(args.runs):
             leverages_loo.append(torch.stack(leverage_loo, dim=0).detach().cpu())
             cooks.append(torch.stack(cook, dim=0).detach().cpu())
 
-    elif isinstance(F, PMatKFAC) and args.strategy == "one_iter_kpsvd":
-        cache = {}
-
-        def solve(A, B, scale=1.0):
-            evals, evecs = A
-            shape = B.shape
-            B = B.movedim(-2, 0).reshape(shape[-2], -1)
-            B = evecs.mT @ B
-            B = B.reshape(shape[-2], *shape[:-2], shape[-1]).movedim(0, -2)
-            scale = torch.as_tensor(scale, dtype=B.dtype, device=B.device)
-            scale = scale.reshape(*scale.shape, *((1,) * (B.ndim - scale.ndim)))
-            evals = evals.reshape(*((1,) * (B.ndim - 2)), -1, 1)
-            B /= scale * evals + args.regul**0.5
-            B = B.movedim(-2, 0).reshape(shape[-2], -1)
-            B = evecs @ B
-            return B.reshape(shape[-2], *shape[:-2], shape[-1]).movedim(0, -2)
-
-        def woodbury_downdate_solve(solve, A, B, U):
-            FinvG = solve(A, B)
-            FinvJ = solve(A, U)
-            leverage = U.mT @ FinvJ
-            FinvG_matrix = FinvG.movedim(-2, 1).flatten(2)
-            cross = U.mT @ FinvG_matrix
-            schur = (
-                torch.eye(
-                    leverage.shape[-1],
-                    dtype=leverage.dtype,
-                    device=leverage.device,
-                )
-                - leverage
-            )
-            effect = torch.linalg.solve(schur, cross)
-            correction = (
-                (FinvJ @ effect)
-                .reshape(B.shape[0], B.shape[-2], *B.shape[1:-2], B.shape[-1])
-                .movedim(1, -2)
-            )
-            return FinvG + correction
-
-        for layer_id, layer in tqdm(lc.layers.items()):
-            A, G = F.data[layer_id]
-            trace = torch.trace(G)
-
-            if layer.transposed:
-                A, G = G, A
-
-            cache[layer_id] = {
-                "eig_a": torch.linalg.eigh(A),
-                "eig_g": torch.linalg.eigh(G),
-                "trace": trace,
-            }
-
-        for inputs, targets in tqdm(light_noisy_noaug):
-            si = []
-            si_loo = []
-            leverage = []
-            leverage_loo = []
-            pfmap_func = Jacobian(
-                model,
-                (inputs, targets),
-                function=func,
-                layer_collection=lc,
-            )
-            pfmap_grad = Jacobian(
-                model,
-                (inputs, targets),
-                function=loss,
-                layer_collection=lc,
-            )
-            for layer_id, layer in lc.layers.items():
-                if layer.has_bias():
-                    Gw, Gb = pfmap_grad.to_torch_layer(layer_id)
-                else:
-                    Gw = pfmap_grad.to_torch_layer(layer_id)[0]
-                sG = Gw.size()
-                Gw = Gw.reshape(sG[0], sG[1], sG[2], -1)
-                if layer.has_bias():
-                    G = torch.cat([Gw, Gb.unsqueeze(-1)], dim=-1)
-
-                if layer.has_bias():
-                    Jw, Jb = pfmap_func.to_torch_layer(layer_id)
-                else:
-                    Jw = pfmap_func.to_torch_layer(layer_id)[0]
-                sJ = Jw.size()
-                Jw = Jw.reshape(sJ[0], sJ[1], sJ[2], -1)
-                if layer.has_bias():
-                    J = torch.cat([Jw, Jb.unsqueeze(-1)], dim=-1)
-
-                solve_g = solve(cache[layer_id]["eig_g"], G)
-                solve_ga = solve(
-                    cache[layer_id]["eig_a"], solve_g.transpose(-1, -2)
-                ).transpose(-1, -2)
-
-                si.append(torch.einsum("onij, Onij->noO", G, solve_ga))
-
-                trace = cache[layer_id]["trace"]
-                trace_loo = torch.sqrt(trace**2 - J.square().sum(dim=(0, 2, 3)))
-                a_update_root = J.permute(1, 3, 0, 2).reshape(
-                    J.shape[1], J.shape[3], -1
-                ) / torch.sqrt(trace_loo[:, None, None])
-                g_update_root = J.permute(1, 2, 0, 3).reshape(
-                    J.shape[1], J.shape[2], -1
-                ) / torch.sqrt(trace_loo[:, None, None])
-
-                solve_g_loo = woodbury_downdate_solve(
-                    partial(solve, scale=trace / trace_loo),
-                    cache[layer_id]["eig_g"],
-                    G.permute(1, 0, 2, 3),
-                    g_update_root,
-                )
-                solve_ga_loo = woodbury_downdate_solve(
-                    partial(solve, scale=trace / trace_loo),
-                    cache[layer_id]["eig_a"],
-                    solve_g_loo.transpose(-1, -2),
-                    a_update_root,
-                ).transpose(-1, -2)
-                si_loo.append(torch.einsum("onij, nOij->noO", G, solve_ga_loo))
-
-                solve_g_j = solve(cache[layer_id]["eig_g"], J)
-                solve_ga_j = solve(
-                    cache[layer_id]["eig_a"], solve_g_j.transpose(-1, -2)
-                ).transpose(-1, -2)
-                leverage.append(torch.einsum("onij, Onij->noO", J, solve_ga_j))
-
-                solve_g_loo_j = woodbury_downdate_solve(
-                    partial(solve, scale=trace / trace_loo),
-                    cache[layer_id]["eig_g"],
-                    J.permute(1, 0, 2, 3),
-                    g_update_root,
-                )
-                solve_ga_loo_j = woodbury_downdate_solve(
-                    partial(solve, scale=trace / trace_loo),
-                    cache[layer_id]["eig_a"],
-                    solve_g_loo_j.transpose(-1, -2),
-                    a_update_root,
-                ).transpose(-1, -2)
-                leverage_loo.append(torch.einsum("onij, nOij->noO", J, solve_ga_loo_j))
-
-            self_influence.append(torch.stack(si, dim=0).detach().cpu())
-            self_influence_loo.append(torch.stack(si_loo, dim=0).detach().cpu())
-            leverages.append(torch.stack(leverage, dim=0).detach().cpu())
-            leverages_loo.append(torch.stack(leverage_loo, dim=0).detach().cpu())
-
     elif isinstance(F, PMatKFAC) and args.strategy == "kfac":
         cache = {}
 
@@ -659,12 +518,17 @@ for i in range(args.runs):
                 pi = (torch.trace(A) / torch.trace(G) * G.size(0) / A.size(0)) ** 0.5
             else:
                 pi = 1
-            print(pi)
-            A = (N**0.5) * A + args.regul**0.5 * pi * torch.eye(
-                A.shape[0], device=A.device, dtype=A.dtype
+            print(args.regul**0.5 * pi, args.regul**0.5 / pi)
+            A = ((N**0.5) * A) + (
+                args.regul**0.5
+                * pi
+                * torch.eye(A.shape[0], device=A.device, dtype=A.dtype)
             )
-            G = (N**0.5) * G + args.regul**0.5 / pi * torch.eye(
-                G.shape[0], device=G.device, dtype=G.dtype
+
+            G = ((N**0.5) * G) + (
+                args.regul**0.5
+                / pi
+                * torch.eye(G.shape[0], device=G.device, dtype=G.dtype)
             )
 
             cache[layer_id] = {
@@ -674,6 +538,11 @@ for i in range(args.runs):
 
             def solve(A, b):
                 return torch.cholesky_solve(b, A)
+
+            def whiten(L, x):
+                return torch.linalg.solve_triangular(
+                    L, x.transpose(-1, -2), upper=False
+                ).transpose(-1, -2)
 
         for inputs, targets in tqdm(light_noisy_noaug):
             si = []
@@ -698,246 +567,120 @@ for i in range(args.runs):
             for layer_id, layer in lc.layers.items():
                 Ga, Gg = pfmap_grad.data[layer_id]
                 Ja, Jg = pfmap_func.data[layer_id]
-                if Ja.size(1) > 1:
-                    si.append(
-                        torch.einsum(
-                            "onsg, Onsg, nsa, nsa->noO",
-                            Gg,
-                            solve(
-                                cache[layer_id]["LG"], Gg.transpose(-1, -2)
-                            ).transpose(-1, -2),
-                            Ga,
-                            solve(
-                                cache[layer_id]["LA"], Ga.transpose(-1, -2)
-                            ).transpose(-1, -2),
-                        )
+
+                Ga_w = whiten(cache[layer_id]["LA"], Ga)
+                Gg_w = whiten(cache[layer_id]["LG"], Gg)
+
+                si.append(
+                    torch.einsum(
+                        "onsg,OnSg,nsa,nSa->noO",
+                        Gg_w,
+                        Gg_w,
+                        Ga_w,
+                        Ga_w,
                     )
-                    si_a = torch.einsum(
-                        "nsa, nsa->n",
-                        Ga,
-                        solve(cache[layer_id]["LA"], Ga.transpose(-1, -2)).transpose(
-                            -1, -2
-                        ),
-                    )[:, None, None]
-                    si_g = torch.einsum(
-                        "onsg, Onsg->noO",
-                        Gg,
-                        solve(cache[layer_id]["LG"], Gg.transpose(-1, -2)).transpose(
-                            -1, -2
-                        ),
-                    )
-
-                else:
-                    si_g = torch.einsum(
-                        "onsg, Onsg->noO",
-                        Gg,
-                        solve(cache[layer_id]["LG"], Gg.transpose(-1, -2)).transpose(
-                            -1, -2
-                        ),
-                    )
-                    si_a = torch.einsum(
-                        "nsa, nsa->n",
-                        Ga,
-                        solve(cache[layer_id]["LA"], Ga.transpose(-1, -2)).transpose(
-                            -1, -2
-                        ),
-                    )[:, None, None]
-                    si.append(si_a * si_g)
-
-                # si_a = Ga * solve(
-                #     cache[layer_id]["LA"], Ga.transpose(-1, -2)
-                # ).transpose(-1, -2)
-                # si.append(
-                #     torch.einsum(
-                #         "onsj, Onsj, nsk ->noO",
-                #         Gg,
-                #         solve(cache[layer_id]["LG"], Gg.transpose(-1, -2)).transpose(
-                #             -1, -2
-                #         ),
-                #         si_a,
-                #     ),
-                # )
-
-                # leverage.append(
-                #     torch.einsum(
-                #         "onsj, Onsj, nsk->noO",
-                #         Jg,
-                #         solve(cache[layer_id]["LG"], Jg.transpose(-1, -2)).transpose(
-                #             -1, -2
-                #         ),
-                #         si_a,
-                #     ),
-                # )
-
-                # si_loo.append(si[-1])
-                # leverage_loo.append(leverage[-1])
-
-                leverage_g = torch.einsum(
-                    "onij, Onij->noO",
-                    Jg,
-                    solve(cache[layer_id]["LG"], Jg.transpose(-1, -2)).transpose(
-                        -1, -2
-                    ),
                 )
-                leverage_a = si_a
 
-                leverage.append(leverage_a * leverage_g)
-                schur_a = (
-                    torch.eye(
-                        leverage_a.shape[-1],
-                        device=leverage_a.device,
-                        dtype=leverage_a.dtype,
+                Ja_w = Ga_w
+                Jg_w = whiten(cache[layer_id]["LG"], Jg)
+
+                leverage.append(
+                    torch.einsum(
+                        "onsg,OnSg,nsa,nSa->noO",
+                        Jg_w,
+                        Jg_w,
+                        Ja_w,
+                        Ja_w,
                     )
-                    - leverage_a
                 )
-                cross_a = si_a
+
+                schur_a = -torch.einsum("nsa, nSa->nsS", Ja_w, Ja_w)
+                schur_a.diagonal(dim1=1, dim2=2).add_(1)
+
+                Jg_w_flat = Jg_w.permute(1, 0, 2, 3).reshape(
+                    Jg_w.size(1), -1, Jg_w.size(3)
+                )
+
+                schur_g = -torch.einsum("nsg, nSg->nsS", Jg_w_flat, Jg_w_flat)
+                schur_g.diagonal(dim1=1, dim2=2).add_(1)
+
+                # if Ja.size(1) ** 2 > Ja.size(-1) * Jg.size(-1):
+                #     G_w = torch.einsum("onsg,nsa->onga", Gg_w, Ga_w)
+
+                #     cross_g = torch.einsum("nsg,onga->onsa", Jg_w_flat, G_w)
+                #     solved_g = torch.linalg.solve(schur_g, cross_g)
+                #     G_w_g = G_w + torch.einsum("nsg,onsa->onga", Jg_w_flat, solved_g)
+                #     cross_a = torch.einsum("onga,nsa->onsg", G_w_g, Ja_w)
+                #     solved_a = torch.linalg.solve(schur_a, cross_a)
+                #     G_w_loo = G_w_g + torch.einsum("nsa,onsg->onga", Ja_w, solved_a)
+                #     si_loo.append(torch.einsum("onga,Onga->noO", G_w, G_w_loo))
+
+                #     J_w = torch.einsum("onsg,nsa->onga", Jg_w, Ja_w)
+
+                #     cross_g = torch.einsum("nsg,onga->onsa", Jg_w_flat, J_w)
+                #     solved_g = torch.linalg.solve(schur_g, cross_g)
+                #     J_w_g = J_w + torch.einsum("nsg,onsa->onga", Jg_w_flat, solved_g)
+                #     cross_a = torch.einsum("onga,nsa->onsg", J_w_g, Ja_w)
+                #     solved_a = torch.linalg.solve(schur_a, cross_a)
+                #     J_w_loo = J_w_g + torch.einsum("nsa,onsg->onga", Ja_w, solved_a)
+                #     leverage_loo.append(torch.einsum("onga,Onga->noO", J_w, J_w_loo))
+                # else:
+                cross_a = torch.einsum("nsa, nSa->nsS", Ga_w, Ja_w)
                 si_loo_a = cross_a @ torch.linalg.solve(
                     schur_a, cross_a.transpose(-1, -2)
                 )
 
-                schur_g = (
-                    torch.eye(
-                        leverage_g.shape[-1],
-                        device=leverage_g.device,
-                        dtype=leverage_g.dtype,
+                Gg_w_flat = Gg_w.permute(1, 0, 2, 3).reshape(
+                    Gg_w.size(1), -1, Gg_w.size(3)
+                )
+                cross_g = torch.einsum("nsg, nSg->nsS", Gg_w_flat, Jg_w_flat)
+                si_loo_g = (
+                    cross_g @ torch.linalg.solve(schur_g, cross_g.transpose(-1, -2))
+                ).reshape(
+                    Gg_w.size(1),
+                    Gg_w.size(0),
+                    Gg_w.size(2),
+                    Gg_w.size(0),
+                    Gg_w.size(2),
+                )
+
+                si_loo.append(
+                    torch.einsum(
+                        "nosOS, nsS->noO",
+                        si_loo_g + torch.einsum("onsg,OnSg->nosOS", Gg_w, Gg_w),
+                        si_loo_a + torch.einsum("nsa,nSa->nsS", Ga_w, Ga_w),
                     )
-                    - leverage_g
                 )
-                cross_g = torch.einsum(
-                    "onij, Onij->noO",
-                    Gg,
-                    solve(cache[layer_id]["LG"], Jg.transpose(-1, -2)).transpose(
-                        -1, -2
-                    ),
+
+                leverage_a = torch.einsum("nsa, nSa->nsS", Ja_w, Ja_w)
+                leverage_loo_a = leverage_a.transpose(-1, -2) @ torch.linalg.solve(
+                    schur_a, leverage_a
                 )
-                si_loo_g = cross_g @ torch.linalg.solve(
-                    schur_g, cross_g.transpose(-1, -2)
+                leverage_g = torch.einsum("nsg, nSg->nsS", Jg_w_flat, Jg_w_flat)
+                leverage_loo_g = (
+                    leverage_g.transpose(-1, -2)
+                    @ torch.linalg.solve(schur_g, leverage_g)
+                ).reshape(
+                    Jg_w.size(1),
+                    Jg_w.size(0),
+                    Jg_w.size(2),
+                    Jg_w.size(0),
+                    Jg_w.size(2),
                 )
-                si_loo.append((si_a + si_loo_a) * (si_g + si_loo_g))
 
-                # A, G = F.data[layer_id]
-                # A_down = (N**0.5) * A - torch.bmm(
-                #     Ja.view(Ja.size(0), -1, Ja.size(-1)).transpose(-1, -2),
-                #     Ja.view(Ja.size(0), -1, Ja.size(-1)),
-                # )
-                # G_down = (N**0.5) * G - torch.einsum("onsj, onsk->njk", Jg, Jg)
-                # if args.use_pi:
-                #     pi = (
-                #         torch.trace(A) / torch.trace(G) * G.size(0) / A.size(0)
-                #     ) ** 0.5
-                # else:
-                #     pi = 1
-                # si_loo_true_g = torch.einsum(
-                #     "onij, Onij->noO",
-                #     Gg,
-                #     torch.linalg.solve(
-                #         G_down
-                #         + args.regul**0.5
-                #         / pi
-                #         * torch.eye(G.shape[0], device=G.device, dtype=G.dtype),
-                #         Gg.transpose(-1, -2),
-                #     ).transpose(-1, -2),
-                # )
-                # si_loo_true_a = torch.einsum(
-                #     "nij, nij->n",
-                #     Ga,
-                #     torch.linalg.solve(
-                #         (N**0.5) * A_down
-                #         + args.regul**0.5
-                #         * pi
-                #         * torch.eye(A.shape[0], device=A.device, dtype=A.dtype),
-                #         Ga.transpose(-1, -2),
-                #     ).transpose(-1, -2),
-                # )[:, None, None]
-
-                # if args.use_pi:
-                #     pi_down = (
-                #         torch.vmap(torch.trace)(A_down)
-                #         / torch.vmap(torch.trace)(G_down)
-                #         * G.size(0)
-                #         / A.size(0)
-                #     ) ** 0.5
-                # else:
-                #     pi_down = 1
-                # A_down_inv = torch.linalg.inv(
-                #     A_down +
-                #     # + args.regul**0.5
-                #     # * pi_down[:, None, None]
-                #      torch.eye(A.shape[0], device=A.device, dtype=A.dtype)[None, ...]
-                # )
-                # A_inv = torch.linalg.inv(
-                #     (N**0.5) * A
-                #     + (args.regul**0.5)
-                #     * pi
-                #     * torch.eye(A.shape[0], device=A.device, dtype=A.dtype)
-                # )
-                # G_inv = torch.linalg.inv(
-                #     (N**0.5) * G
-                #     + (args.regul**0.5)
-                #     / pi
-                #     * torch.eye(G.shape[0], device=G.device, dtype=G.dtype)
-                # )
-
-                # A_wood_inv = A_inv[None, ...] + torch.einsum(
-                #     "tT, nsT->nts", A_inv, Ja
-                # ) @ torch.linalg.solve(
-                #     torch.eye(Ja.size(1), device=Ja.device, dtype=Ja.dtype)[None, :, :]
-                #     - torch.einsum("nst, tT, nST->nsS", Ja, A_inv, Ja),
-                #     torch.einsum("nst, tT->nsT", Ja, A_inv),
-                # )
-                # si_loo_a = si_a = torch.einsum(
-                #     "nij, njJ, niJ->n",
-                #     Ga,
-                #     A_wood_inv,
-                #     Ga,
-                # )[:, None, None]
-
-                # Jg_flat = Jg.permute(1, 0, 2, 3).reshape(Jg.size(1), -1, Jg.size(-1))
-
-                # G_down_inv = torch.linalg.inv(
-                #     G_down
-                #     + (args.regul**0.5)
-                #     / pi
-                #     * torch.eye(G.shape[0], device=G.device, dtype=G.dtype)[None, ...]
-                # )
-                # G_wood_inv = G_inv[None, ...] + torch.einsum(
-                #     "tT, nsT->nts", G_inv, Jg_flat
-                # ) @ torch.linalg.solve(
-                #     torch.eye(
-                #         Jg_flat.size(1), device=Jg_flat.device, dtype=Jg_flat.dtype
-                #     )[None, :, :]
-                #     - torch.einsum("nst, tT, nST->nsS", Jg_flat, G_inv, Jg_flat),
-                #     torch.einsum("nst, tT->nsT", Jg_flat, G_inv),
-                # )
-                # si_loo_g = si_a = torch.einsum(
-                #     "onij, njJ, oniJ->n",
-                #     Gg,
-                #     G_wood_inv,
-                #     Gg,
-                # )[:, None, None]
-                # si_loo.append(si_loo_a * si_loo_g)
-
-                # if Ja.size(1) == 1:
-                #     torch.testing.assert_close(G_down_inv, G_wood_inv)
-
-                #     print((si_a + si_loo_a).squeeze(), si_loo_true_a.squeeze())
-                #     torch.testing.assert_close(si_a + si_loo_a, si_loo_true_a)
-                #     print(
-                #         si_loo[-1].squeeze(), (si_loo_true_a * si_loo_true_g).squeeze()
-                #     )
-                #     print(A_down_inv[0], A_wood_inv[0])
-                #     torch.testing.assert_close(A_down_inv, A_wood_inv)
-                #     torch.testing.assert_close(
-                #         si_loo[-1], si_loo_true_a * si_loo_true_g
-                #     )
-                # assert torch.all(torch.linalg.eigvalsh(schur_a).amin(dim=-1) > 0)
-                # assert torch.all(torch.linalg.eigvalsh(schur_g).amin(dim=-1) > 0)
-                leverage_loo_a = si_loo_a
-                leverage_loo_g = leverage_g @ torch.linalg.solve(
-                    schur_g, leverage_g.transpose(-1, -2)
-                )
                 leverage_loo.append(
-                    (leverage_a + leverage_loo_a) * (leverage_g + leverage_loo_g)
+                    torch.einsum(
+                        "nosOS, nsS->noO",
+                        leverage_loo_g
+                        + leverage_g.reshape(
+                            Jg_w.size(1),
+                            Jg_w.size(0),
+                            Jg_w.size(2),
+                            Jg_w.size(0),
+                            Jg_w.size(2),
+                        ),
+                        leverage_loo_a + leverage_a,
+                    )
                 )
 
             self_influence.append(torch.stack(si, dim=0).detach().cpu())
