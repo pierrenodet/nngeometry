@@ -544,6 +544,17 @@ for i in range(args.runs):
                     L, x.transpose(-1, -2), upper=False
                 ).transpose(-1, -2)
 
+        def woodburry_solve(U, b):
+            if U.size(-1) <= U.size(-2):
+                schur = -(U.transpose(-1, -2) @ U)
+                schur.diagonal(dim1=-2, dim2=-1).add_(1)
+                return torch.linalg.solve(schur, b.transpose(-1, -2)).transpose(-1, -2)
+            else:
+                schur = -(U @ U.transpose(-1, -2))
+                schur.diagonal(dim1=-2, dim2=-1).add_(1)
+                cross = b @ U.transpose(-1, -2)
+                return b + cross @ torch.linalg.solve(schur, U)
+
         for inputs, targets in tqdm(light_noisy_noaug):
             si = []
             si_loo = []
@@ -594,92 +605,56 @@ for i in range(args.runs):
                     )
                 )
 
-                schur_a = -torch.einsum("nsa, nSa->nsS", Ja_w, Ja_w)
-                schur_a.diagonal(dim1=1, dim2=2).add_(1)
-
-                Jg_w_flat = Jg_w.permute(1, 0, 2, 3).reshape(
-                    Jg_w.size(1), -1, Jg_w.size(3)
-                )
-
-                schur_g = -torch.einsum("nsg, nSg->nsS", Jg_w_flat, Jg_w_flat)
-                schur_g.diagonal(dim1=1, dim2=2).add_(1)
-
-                # if Ja.size(1) ** 2 > Ja.size(-1) * Jg.size(-1):
-                #     G_w = torch.einsum("onsg,nsa->onga", Gg_w, Ga_w)
-
-                #     cross_g = torch.einsum("nsg,onga->onsa", Jg_w_flat, G_w)
-                #     solved_g = torch.linalg.solve(schur_g, cross_g)
-                #     G_w_g = G_w + torch.einsum("nsg,onsa->onga", Jg_w_flat, solved_g)
-                #     cross_a = torch.einsum("onga,nsa->onsg", G_w_g, Ja_w)
-                #     solved_a = torch.linalg.solve(schur_a, cross_a)
-                #     G_w_loo = G_w_g + torch.einsum("nsa,onsg->onga", Ja_w, solved_a)
-                #     si_loo.append(torch.einsum("onga,Onga->noO", G_w, G_w_loo))
-
-                #     J_w = torch.einsum("onsg,nsa->onga", Jg_w, Ja_w)
-
-                #     cross_g = torch.einsum("nsg,onga->onsa", Jg_w_flat, J_w)
-                #     solved_g = torch.linalg.solve(schur_g, cross_g)
-                #     J_w_g = J_w + torch.einsum("nsg,onsa->onga", Jg_w_flat, solved_g)
-                #     cross_a = torch.einsum("onga,nsa->onsg", J_w_g, Ja_w)
-                #     solved_a = torch.linalg.solve(schur_a, cross_a)
-                #     J_w_loo = J_w_g + torch.einsum("nsa,onsg->onga", Ja_w, solved_a)
-                #     leverage_loo.append(torch.einsum("onga,Onga->noO", J_w, J_w_loo))
-                # else:
-                cross_a = torch.einsum("nsa, nSa->nsS", Ga_w, Ja_w)
-                si_loo_a = cross_a @ torch.linalg.solve(
-                    schur_a, cross_a.transpose(-1, -2)
-                )
-
+                Ga_w_loo = woodburry_solve(Ja_w, Ga_w)
+                Ja_w_loo = Ga_w_loo
                 Gg_w_flat = Gg_w.permute(1, 0, 2, 3).reshape(
                     Gg_w.size(1), -1, Gg_w.size(3)
                 )
-                cross_g = torch.einsum("nsg, nSg->nsS", Gg_w_flat, Jg_w_flat)
-                si_loo_g = (
-                    cross_g @ torch.linalg.solve(schur_g, cross_g.transpose(-1, -2))
-                ).reshape(
+                Jg_w_flat = Jg_w.permute(1, 0, 2, 3).reshape(
+                    Jg_w.size(1), -1, Jg_w.size(3)
+                )
+                Gg_w_loo_flat, Jg_w_loo_flat = woodburry_solve(
+                    Jg_w_flat,
+                    torch.cat((Gg_w_flat, Jg_w_flat), dim=1),
+                ).split((Gg_w_flat.size(1), Jg_w_flat.size(1)), dim=1)
+                Gg_w_loo = Gg_w_loo_flat.reshape(
                     Gg_w.size(1),
                     Gg_w.size(0),
                     Gg_w.size(2),
-                    Gg_w.size(0),
-                    Gg_w.size(2),
-                )
-
-                si_loo.append(
-                    torch.einsum(
-                        "nosOS, nsS->noO",
-                        si_loo_g + torch.einsum("onsg,OnSg->nosOS", Gg_w, Gg_w),
-                        si_loo_a + torch.einsum("nsa,nSa->nsS", Ga_w, Ga_w),
-                    )
-                )
-
-                leverage_a = torch.einsum("nsa, nSa->nsS", Ja_w, Ja_w)
-                leverage_loo_a = leverage_a.transpose(-1, -2) @ torch.linalg.solve(
-                    schur_a, leverage_a
-                )
-                leverage_g = torch.einsum("nsg, nSg->nsS", Jg_w_flat, Jg_w_flat)
-                leverage_loo_g = (
-                    leverage_g.transpose(-1, -2)
-                    @ torch.linalg.solve(schur_g, leverage_g)
-                ).reshape(
+                    Gg_w.size(3),
+                ).permute(1, 0, 2, 3)
+                Jg_w_loo = Jg_w_loo_flat.reshape(
                     Jg_w.size(1),
                     Jg_w.size(0),
                     Jg_w.size(2),
-                    Jg_w.size(0),
-                    Jg_w.size(2),
-                )
+                    Jg_w.size(3),
+                ).permute(1, 0, 2, 3)
 
+                si_loo.append(
+                    torch.einsum(
+                        "onsg,OnSg,nsa,nSa->noO",
+                        Gg_w_loo,
+                        Gg_w,
+                        Ga_w_loo,
+                        Ga_w,
+                    )
+                )
+                cook.append(
+                    torch.einsum(
+                        "onsg,OnSg,nsa,nSa->noO",
+                        Gg_w_loo,
+                        Gg_w_loo,
+                        Ga_w_loo,
+                        Ga_w_loo,
+                    )
+                )
                 leverage_loo.append(
                     torch.einsum(
-                        "nosOS, nsS->noO",
-                        leverage_loo_g
-                        + leverage_g.reshape(
-                            Jg_w.size(1),
-                            Jg_w.size(0),
-                            Jg_w.size(2),
-                            Jg_w.size(0),
-                            Jg_w.size(2),
-                        ),
-                        leverage_loo_a + leverage_a,
+                        "onsg,OnSg,nsa,nSa->noO",
+                        Jg_w_loo,
+                        Jg_w,
+                        Ja_w_loo,
+                        Ja_w,
                     )
                 )
 
@@ -687,7 +662,7 @@ for i in range(args.runs):
             self_influence_loo.append(torch.stack(si_loo, dim=0).detach().cpu())
             leverages.append(torch.stack(leverage, dim=0).detach().cpu())
             leverages_loo.append(torch.stack(leverage_loo, dim=0).detach().cpu())
-            # cooks.append(torch.stack(cook, dim=0).detach().cpu())
+            cooks.append(torch.stack(cook, dim=0).detach().cpu())
 
     elif isinstance(F, PMatBlockDiag):
         cache = {}
