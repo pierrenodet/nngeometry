@@ -83,7 +83,7 @@ args.competitors = True
 args.seed = 1337
 args.ft = False
 args.output_dir = "mislabeled-output"
-args.device = "mps"
+args.device = "cuda"
 
 
 os.makedirs(args.output_dir, exist_ok=True)
@@ -93,7 +93,7 @@ torch.manual_seed(args.seed)
 transform, dataset, model_fn, optimizer_fn, classes = DATASETS[args.dataset]
 
 # model_fn = partial(model_fn, c=16)
-model_fn = partial(model_fn, c=32, h=2, d=4)
+model_fn = partial(model_fn, c=1024, h=1, d=4)
 
 if transform is not None:
     if hasattr(transform, "transforms"):
@@ -204,7 +204,7 @@ for i in range(args.runs):
     args.rank = 100
     args.strategy = "kfac"
     args.use_pi = True
-    args.repr = "F_bd"
+    args.repr = "F_kfac"
     if "kfac" in args.repr:
         repr = partial(PMatKFAC, strategy=args.strategy)
         # repr = PMatKFAC
@@ -254,8 +254,8 @@ for i in range(args.runs):
     #     examples=DataLoader(noisy_train_set, batch_size=128, shuffle=False),
     # )
 
-    # if hasattr(F, "update_diag"):
-    #     F.update_diag(noisy_train)
+    if hasattr(F, "update_diag"):
+        F.update_diag(noisy_train)
 
     N = noisy_examples.shape[0]
     if not isinstance(F, FMatDense):
@@ -698,22 +698,51 @@ for i in range(args.runs):
             for layer_id, layer in lc.layers.items():
                 Ga, Gg = pfmap_grad.data[layer_id]
                 Ja, Jg = pfmap_func.data[layer_id]
+                if Ja.size(1) > 1:
+                    si.append(
+                        torch.einsum(
+                            "onsg, Onsg, nsa, nsa->noO",
+                            Gg,
+                            solve(
+                                cache[layer_id]["LG"], Gg.transpose(-1, -2)
+                            ).transpose(-1, -2),
+                            Ga,
+                            solve(
+                                cache[layer_id]["LA"], Ga.transpose(-1, -2)
+                            ).transpose(-1, -2),
+                        )
+                    )
+                    si_a = torch.einsum(
+                        "nsa, nsa->n",
+                        Ga,
+                        solve(cache[layer_id]["LA"], Ga.transpose(-1, -2)).transpose(
+                            -1, -2
+                        ),
+                    )[:, None, None]
+                    si_g = torch.einsum(
+                        "onsg, Onsg->noO",
+                        Gg,
+                        solve(cache[layer_id]["LG"], Gg.transpose(-1, -2)).transpose(
+                            -1, -2
+                        ),
+                    )
 
-                si_g = torch.einsum(
-                    "onij, Onij->noO",
-                    Gg,
-                    solve(cache[layer_id]["LG"], Gg.transpose(-1, -2)).transpose(
-                        -1, -2
-                    ),
-                )
-                si_a = torch.einsum(
-                    "nij, nij->n",
-                    Ga,
-                    solve(cache[layer_id]["LA"], Ga.transpose(-1, -2)).transpose(
-                        -1, -2
-                    ),
-                )[:, None, None]
-                si.append(si_a * si_g)
+                else:
+                    si_g = torch.einsum(
+                        "onsg, Onsg->noO",
+                        Gg,
+                        solve(cache[layer_id]["LG"], Gg.transpose(-1, -2)).transpose(
+                            -1, -2
+                        ),
+                    )
+                    si_a = torch.einsum(
+                        "nsa, nsa->n",
+                        Ga,
+                        solve(cache[layer_id]["LA"], Ga.transpose(-1, -2)).transpose(
+                            -1, -2
+                        ),
+                    )[:, None, None]
+                    si.append(si_a * si_g)
 
                 # si_a = Ga * solve(
                 #     cache[layer_id]["LA"], Ga.transpose(-1, -2)
@@ -820,11 +849,87 @@ for i in range(args.runs):
                 #         Ga.transpose(-1, -2),
                 #     ).transpose(-1, -2),
                 # )[:, None, None]
+
+                # if args.use_pi:
+                #     pi_down = (
+                #         torch.vmap(torch.trace)(A_down)
+                #         / torch.vmap(torch.trace)(G_down)
+                #         * G.size(0)
+                #         / A.size(0)
+                #     ) ** 0.5
+                # else:
+                #     pi_down = 1
+                # A_down_inv = torch.linalg.inv(
+                #     A_down +
+                #     # + args.regul**0.5
+                #     # * pi_down[:, None, None]
+                #      torch.eye(A.shape[0], device=A.device, dtype=A.dtype)[None, ...]
+                # )
+                # A_inv = torch.linalg.inv(
+                #     (N**0.5) * A
+                #     + (args.regul**0.5)
+                #     * pi
+                #     * torch.eye(A.shape[0], device=A.device, dtype=A.dtype)
+                # )
+                # G_inv = torch.linalg.inv(
+                #     (N**0.5) * G
+                #     + (args.regul**0.5)
+                #     / pi
+                #     * torch.eye(G.shape[0], device=G.device, dtype=G.dtype)
+                # )
+
+                # A_wood_inv = A_inv[None, ...] + torch.einsum(
+                #     "tT, nsT->nts", A_inv, Ja
+                # ) @ torch.linalg.solve(
+                #     torch.eye(Ja.size(1), device=Ja.device, dtype=Ja.dtype)[None, :, :]
+                #     - torch.einsum("nst, tT, nST->nsS", Ja, A_inv, Ja),
+                #     torch.einsum("nst, tT->nsT", Ja, A_inv),
+                # )
+                # si_loo_a = si_a = torch.einsum(
+                #     "nij, njJ, niJ->n",
+                #     Ga,
+                #     A_wood_inv,
+                #     Ga,
+                # )[:, None, None]
+
+                # Jg_flat = Jg.permute(1, 0, 2, 3).reshape(Jg.size(1), -1, Jg.size(-1))
+
+                # G_down_inv = torch.linalg.inv(
+                #     G_down
+                #     + (args.regul**0.5)
+                #     / pi
+                #     * torch.eye(G.shape[0], device=G.device, dtype=G.dtype)[None, ...]
+                # )
+                # G_wood_inv = G_inv[None, ...] + torch.einsum(
+                #     "tT, nsT->nts", G_inv, Jg_flat
+                # ) @ torch.linalg.solve(
+                #     torch.eye(
+                #         Jg_flat.size(1), device=Jg_flat.device, dtype=Jg_flat.dtype
+                #     )[None, :, :]
+                #     - torch.einsum("nst, tT, nST->nsS", Jg_flat, G_inv, Jg_flat),
+                #     torch.einsum("nst, tT->nsT", Jg_flat, G_inv),
+                # )
+                # si_loo_g = si_a = torch.einsum(
+                #     "onij, njJ, oniJ->n",
+                #     Gg,
+                #     G_wood_inv,
+                #     Gg,
+                # )[:, None, None]
+                # si_loo.append(si_loo_a * si_loo_g)
+
                 # if Ja.size(1) == 1:
+                #     torch.testing.assert_close(G_down_inv, G_wood_inv)
+
                 #     print((si_a + si_loo_a).squeeze(), si_loo_true_a.squeeze())
                 #     torch.testing.assert_close(si_a + si_loo_a, si_loo_true_a)
-                #     print(si_loo[-1].squeeze(), (si_loo_true_a * si_loo_true_g).squeeze())
-                #     torch.testing.assert_close(si_loo[-1], si_loo_true_a * si_loo_true_g)
+                #     print(
+                #         si_loo[-1].squeeze(), (si_loo_true_a * si_loo_true_g).squeeze()
+                #     )
+                #     print(A_down_inv[0], A_wood_inv[0])
+                #     torch.testing.assert_close(A_down_inv, A_wood_inv)
+                #     torch.testing.assert_close(
+                #         si_loo[-1], si_loo_true_a * si_loo_true_g
+                #     )
                 # assert torch.all(torch.linalg.eigvalsh(schur_a).amin(dim=-1) > 0)
                 # assert torch.all(torch.linalg.eigvalsh(schur_g).amin(dim=-1) > 0)
                 leverage_loo_a = si_loo_a
