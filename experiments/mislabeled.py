@@ -73,11 +73,11 @@ parser.add_argument("--correction_ratio", type=float, default=0.15)
 
 args = parser.parse_args()
 
-args.dataset = "fashion-mnist"
+args.dataset = "mnist-1d"
 args.runs = 1
 args.regul = 1e-4
 # args.ft = True
-args.epochs = 1
+args.epochs = 1000
 args.repr = "F_kfac"
 args.competitors = True
 args.seed = 1337
@@ -96,7 +96,7 @@ torch.manual_seed(args.seed)
 transform, dataset, model_fn, optimizer_fn, classes = DATASETS[args.dataset]
 
 # model_fn = partial(model_fn, c=16)
-# model_fn = partial(model_fn, c=2048, h=2, d=4)
+model_fn = partial(model_fn, c=512, h=4, d=4)
 
 if transform is not None:
     if hasattr(transform, "transforms"):
@@ -312,13 +312,11 @@ for i in range(args.runs):
         F.evals = lr_evals
         F.evecs = lr_evecs
     # %%
-    from nngeometry.object.map import PFMapDense
-
     avg_lam = F.trace() / F.layer_collection.numel()
     print(avg_lam)
-    args.regul = 1e-8
+    args.regul = 1e-10
     args.use_pi = True
-    light_noisy_noaug = DataLoader(noisy_train_set, batch_size=8, shuffle=False)
+    light_noisy_noaug = DataLoader(noisy_train_set, batch_size=16, shuffle=False)
 
     self_influence = []
     self_influence_loo = []
@@ -536,13 +534,15 @@ for i in range(args.runs):
                 "LG": torch.linalg.cholesky(G),
             }
 
-            def solve(A, b):
-                return torch.cholesky_solve(b, A)
+        def solve(A, b):
+            return torch.cholesky_solve(b, A)
 
-            def whiten(L, x):
-                return torch.linalg.solve_triangular(
-                    L, x.transpose(-1, -2), upper=False
-                ).transpose(-1, -2)
+        def whiten(L, x):
+            return torch.linalg.solve_triangular(
+                L, x.transpose(-1, -2), upper=False
+            ).transpose(-1, -2)
+
+        print(torch.backends.opt_einsum.enabled)
 
         def woodburry_solve(U, b):
             if U.size(-1) <= U.size(-2):
@@ -803,14 +803,14 @@ for i in range(args.runs):
         self_influence_loo = torch.cat(self_influence_loo, dim=0)[None, ...]
         leverages = torch.cat(leverages, dim=0)[None, ...]
         leverages_loo = torch.cat(leverages_loo, dim=0)[None, ...]
-        # cooks = torch.cat(cooks, dim=0)[None, ...]
+        cooks = torch.cat(cooks, dim=0)[None, ...]
         # det_schurs = torch.cat(det_schurs, dim=0)[None, ...]
     else:
         self_influence = torch.cat(self_influence, dim=1)
         self_influence_loo = torch.cat(self_influence_loo, dim=1)
         leverages = torch.cat(leverages, dim=1)
         leverages_loo = torch.cat(leverages_loo, dim=1)
-        # cooks = torch.cat(cooks, dim=1)
+        cooks = torch.cat(cooks, dim=1)
         # det_schurs = torch.cat(det_schurs, dim=1)
 
     # %%
@@ -834,7 +834,7 @@ for i in range(args.runs):
     tr_self_influence_loo = torch.diagonal(self_influence_loo, dim1=-2, dim2=-1).sum(
         dim=-1
     )
-    # tr_cooks = torch.diagonal(cooks, dim1=-2, dim2=-1).sum(dim=-1)
+    tr_cooks = torch.diagonal(cooks, dim1=-2, dim2=-1).sum(dim=-1)
     tr_leverages = torch.diagonal(leverages, dim1=-2, dim2=-1).sum(dim=-1)
     tr_leverages_loo = torch.diagonal(leverages_loo, dim1=-2, dim2=-1).sum(dim=-1)
 
@@ -843,7 +843,7 @@ for i in range(args.runs):
     for name, scores in [
         ("self-influence", tr_self_influence),
         ("LOO self-influence (or cook bar)", tr_self_influence_loo),
-        # ("cook", tr_cooks),
+        ("cook", tr_cooks),
         ("leverage", tr_leverages),
         ("LOO leverage", tr_leverages_loo),
         # ("det schur", -det_schurs),
@@ -870,7 +870,7 @@ for i in range(args.runs):
         roc_auc_score(
             noisy_examples, tr_self_influence_loo.sum(dim=0).numpy(force=True)
         ),
-        # roc_auc_score(noisy_examples, tr_cooks.sum(dim=0).numpy(force=True)),
+        roc_auc_score(noisy_examples, tr_cooks.sum(dim=0).numpy(force=True)),
         roc_auc_score(noisy_examples, tr_leverages.sum(dim=0).numpy(force=True)),
         roc_auc_score(noisy_examples, tr_leverages_loo.sum(dim=0).numpy(force=True)),
         # roc_auc_score(noisy_examples, -det_schurs.sum(dim=0).numpy(force=True)),
@@ -880,7 +880,7 @@ for i in range(args.runs):
         roc_auc_score(noisy_examples, margins.numpy(force=True)),
         roc_auc_score(noisy_examples, tr_self_influence[-1].numpy(force=True)),
         roc_auc_score(noisy_examples, tr_self_influence_loo[-1].numpy(force=True)),
-        # roc_auc_score(noisy_examples, tr_cooks[-1].numpy(force=True)),
+        roc_auc_score(noisy_examples, tr_cooks[-1].numpy(force=True)),
         roc_auc_score(noisy_examples, tr_leverages[-1].numpy(force=True)),
         roc_auc_score(noisy_examples, tr_leverages_loo[-1].numpy(force=True)),
         # roc_auc_score(noisy_examples, -det_schurs[-1].numpy(force=True)),
@@ -960,4 +960,4 @@ plt.scatter(
 plt.axline((0, 0), slope=1)
 plt.show()
 
-# %%
+ # %%
