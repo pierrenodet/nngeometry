@@ -1192,6 +1192,51 @@ class PMatEKFAC(PMatAbstract):
             out_dict[layer_id] = self._proj_from_kfe(mv_kfe, evecs[layer_id], layer)
         return PVector(layer_collection=lc_merged, dict_repr=out_dict)
 
+    def mmap(self, pfmap):
+        self._check_diag_updated()
+        out_dict = dict()
+        evecs, diags = self.data
+
+        if isinstance(pfmap, PFMapDense):
+            for layer_id, layer, vals in pfmap.iter_by_layer():
+                if layer_id not in self.layer_collection.layers:
+                    continue
+                v_kfe = self._proj_to_kfe_batched(vals, evecs[layer_id], layer)
+                mv_kfe = v_kfe * diags[layer_id]
+                out_dict[layer_id] = self._proj_from_kfe_batched(
+                    mv_kfe, evecs[layer_id], layer
+                )
+            return PFMapDense.from_dict(
+                layer_collection=pfmap.layer_collection,
+                generator=pfmap.generator,
+                data_dict=out_dict,
+            )
+        elif isinstance(pfmap, PFMapFactored):
+            for layer_id, layer in pfmap.layer_collection.layers.items():
+                if layer_id not in self.layer_collection.layers:
+                    continue
+                a, g = pfmap.data[layer_id]
+                evecs_a, evecs_g = evecs[layer_id]
+                diag = diags[layer_id]
+                if layer.transposed:
+                    diag = diag.transpose(-1, -2)
+                sa, sg = a.size(), g.size()
+                a = torch.mm(a.view(-1, sa[-1]), evecs_a).view(*sa)
+                g = torch.mm(g.view(-1, sg[-1]), evecs_g).view(*sg)
+                mv_kfe = torch.einsum("onsg, nsa, ga->onga", g, a, diag)
+                if layer.transposed:
+                    mv_kfe = mv_kfe.transpose(-1, -2)
+                out_dict[layer_id] = self._proj_from_kfe_batched(
+                    mv_kfe, evecs[layer_id], layer
+                )
+            return PFMapDense.from_dict(
+                layer_collection=pfmap.layer_collection,
+                generator=pfmap.generator,
+                data_dict=out_dict,
+            )
+        else:
+            return super().mmap(pfmap)
+
     def vTMv(self, vector):
         self._check_diag_updated()
         vector_dict = vector.to_dict()
