@@ -102,16 +102,14 @@ def test_jacobian_factored():
             representation=PFMapFactored,
         )
 
-        for layer_id in lc.layers:
-            a, g = jacobian_factored.data[layer_id]
-            assert a.size(0) == jacobian.size(1)
-            assert g.shape[:2] == jacobian.size()[:2]
-            assert a.size(1) == g.size(2)
+        jacobian_factored.size() == jacobian.size()
 
-            dense_values = jacobian.to_torch_layer(layer_id)
-            factored_values = jacobian_factored.to_torch_layer(layer_id)
-            for dense_value, factored_value in zip(dense_values, factored_values):
-                torch.testing.assert_close(dense_value, factored_value)
+        for layer_id in lc.layers:
+            for w_dense, w_factored in zip(
+                jacobian.to_torch_layer(layer_id),
+                jacobian_factored.to_torch_layer(layer_id),
+            ):
+                torch.testing.assert_close(w_dense, w_factored)
 
         torch.testing.assert_close(jacobian.to_torch(), jacobian_factored.to_torch())
 

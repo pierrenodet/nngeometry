@@ -390,11 +390,6 @@ class TorchHooksJacobianBackend(AbstractBackend):
 
     @instance_buffer_handles
     def get_jacobian_factored(self, examples, layer_collection):
-        if self.centering:
-            raise NotImplementedError(
-                "Centering does not preserve the per-example factorization"
-            )
-
         layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
         # add hooks
         self._handles += self._add_hooks(

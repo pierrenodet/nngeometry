@@ -235,7 +235,7 @@ class PFMapFactored(PFMap, AdjointMixin):
     def to_torch_layer(self, layer_id):
         layer = self.layer_collection.layers[layer_id]
         a, g = self.data[layer_id]
-        grad = torch.einsum("cnlo,nli->cnoi", g, a)
+        grad = torch.einsum("onsg,nsa->onga", g, a)
 
         if layer.has_bias():
             w = grad[..., :-1]
@@ -249,18 +249,8 @@ class PFMapFactored(PFMap, AdjointMixin):
 
         if layer.has_bias():
             return w, b
-        return (w,)
-
-    def to(self, **kwargs):
-        data = {
-            layer_id: tuple(value.to(**kwargs) for value in factors)
-            for layer_id, factors in self.data.items()
-        }
-        return PFMapFactored(
-            layer_collection=self.layer_collection,
-            generator=self.generator,
-            data=data,
-        )
+        else:
+            return (w,)
 
 
 class PFMapImplicit(PFMap):

@@ -937,11 +937,10 @@ class PMatKFAC(PMatAbstract):
                 sg = g.size()
                 A, G = self.data[layer_id]
                 if layer.transposed:
-                    a = torch.mm(a.view(-1, sa[-1]), A.t())
-                    g = torch.mm(g.view(-1, sg[-1]), G)
-                else:
-                    a = torch.mm(a.view(-1, sa[-1]), A)
-                    g = torch.mm(g.view(-1, sg[-1]), G.t())
+                    A = A.t()
+                    G = G.t()
+                a = torch.mm(a.view(-1, sa[-1]), A)
+                g = torch.mm(g.view(-1, sg[-1]), G.t())
                 out_dict[layer_id] = (a.view(*sa), g.view(*sg))
 
             return PFMapFactored(
