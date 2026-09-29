@@ -26,9 +26,9 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-  "torch",
+  "torch>=2.14.0",
   "torchvision",
-  "tqdm"
+  "tqdm",
 ]
 
 [project.urls]
@@ -75,19 +75,3 @@ exclude = ["docs"]
 [tool.ruff.lint]
 preview = true
 select = ["A", "E", "F", "W", "I"]
-
-[tool.uv.sources]
-torch = [
-  { index = "pytorch-cpu", extra = "cpu" },
-]
-torchvision = [
-  { index = "pytorch-cpu", extra = "cpu" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[project.optional-dependencies]
-cpu = ["torch", "torchvision"]

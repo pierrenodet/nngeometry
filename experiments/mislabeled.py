@@ -1,3 +1,16 @@
+# /// script
+# dependencies = [
+#  "nngeometry",
+#  "scikit-learn",
+#  "mnist1d",
+#  "opt-einsum",
+#  "h5py",
+#  "datasets"
+# ]
+# [tool.uv.sources]
+# nngeometry = { path = ".." , editable = true}
+# ///
+
 # %%
 import argparse
 import json
@@ -68,7 +81,6 @@ args.epochs = 1000
 args.repr = "F_kfac"
 args.seed = 1337
 args.output_dir = "mislabeled-output"
-args.device = "cuda"
 args.rank = 1000
 args.use_pi = True
 args.strategy = "kfac"
