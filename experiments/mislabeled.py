@@ -21,6 +21,8 @@ from copy import deepcopy
 from functools import partial
 from itertools import chain, product
 
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
 import h5py
 import requests
 import torch
@@ -47,7 +49,8 @@ from experiments.nng_utils import last_layer, supported_kfac_layers
 from nngeometry.backend import TorchHooksJacobianBackend
 from nngeometry.jacobian import Jacobian
 from nngeometry.layercollection import LayerCollection
-from nngeometry.metrics import FIM, FIM_MonteCarlo
+from nngeometry.metrics import FIM, FIM_MonteCarlo, sqrt_var_classif_logits
+from nngeometry.object.fspace import FMatDense
 from nngeometry.object.map import PFMapFactored, random_pfmap
 from nngeometry.object.pspace import (
     PMatBlockDiag,
@@ -57,8 +60,6 @@ from nngeometry.object.pspace import (
     PMatLowRank,
 )
 from nngeometry.object.vector import FVector
-
-os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 
 def is_interactive():
@@ -76,13 +77,14 @@ args = parser.parse_args()
 
 args.dataset = "mnist-1d"
 args.runs = 1
-args.regul = 1e-3
+args.regul = 1e-8
 args.epochs = 1000
 args.repr = "F_kfac"
 args.seed = 1337
-args.rank = 1000
+args.rank = 10
 args.use_pi = True
 args.strategy = "kfac"
+args.device = "mps"
 
 
 os.makedirs(args.output_dir, exist_ok=True)
@@ -135,9 +137,13 @@ if args.dataset == "cifar-10":
 train = DataLoader(train_set, batch_size=128, shuffle=True)
 
 noisy_train_set = deepcopy(train_set)
-noisy_probability = torch.rand(noisy_train_set.tensors[1].shape[0])
+targets = noisy_train_set.tensors[1]
+noisy_probability = torch.rand(targets.shape[0])
 noisy_examples = noisy_probability <= args.noise_ratio
-noisy_labels = torch.randint(0, len(classes), (torch.sum(noisy_examples),))
+noisy_labels = (
+    targets[noisy_examples]
+    + torch.randint(1, len(classes), (torch.sum(noisy_examples),))
+) % len(classes)
 noisy_train_set.tensors[1][noisy_examples] = noisy_labels
 
 noisy_train = DataLoader(noisy_train_set, batch_size=128, shuffle=True)
@@ -186,56 +192,54 @@ for i, (c, d) in enumerate(
         print(none_test_accuracy, none_test_loss)
 
         # %%
-
-        if "ekfac" in args.repr:
-            repr = partial(PMatEKFAC, strategy=args.strategy)
-            lc = supported_kfac_layers(LayerCollection.from_model(model))
-        elif "kfac" in args.repr:
-            repr = partial(PMatKFAC, strategy=args.strategy)
-            lc = supported_kfac_layers(LayerCollection.from_model(model))
-        elif "bd" in args.repr:
-            repr = PMatBlockDiag
-            lc = supported_kfac_layers(LayerCollection.from_model(model))
-            # lc = LayerCollection.from_model(model)
-        elif "lr" in args.repr:
-            repr = PMatLowRank
-            lc = supported_kfac_layers(LayerCollection.from_model(model))
-            # lc = LayerCollection.from_model(model)
-
-        F = FIM(
-            model,
-            DataLoader(noisy_train_set, batch_size=128, shuffle=False),
-            repr,
-            "classif_logits",
-            device=args.device,
-            layer_collection=lc,
-            verbose=True,
-        )
-
-        from nngeometry.object.fspace import FMatDense
-
-        def loss(inputs, targets):
-            return tF.cross_entropy(model(inputs), targets, reduction="none")
-
-        from nngeometry.metrics import sqrt_var_classif_logits
-
         def func(inputs, targets):
             return sqrt_var_classif_logits(model(inputs))
+
+        def logits(inputs, targets):
+            return model(inputs)
 
         # def func(inputs, targets):
         #     logp = tF.log_softmax(model(inputs), dim=1)
         #     p = torch.exp(logp).detach()
         #     return torch.sqrt(p) * logp
 
-        def logits(inputs, targets):
-            return model(inputs)
+        def loss(inputs, targets):
+            return tF.cross_entropy(model(inputs), targets, reduction="none")
 
-        # generator = TorchHooksJacobianBackend(model, logits, centering=False, verbose=True)
-        # F = FMatDense(
-        #     lc,
-        #     generator,
-        #     examples=DataLoader(noisy_train_set, batch_size=128, shuffle=False),
-        # )
+        if "F" in args.repr:
+            if "ekfac" in args.repr:
+                repr = partial(PMatEKFAC, strategy=args.strategy)
+                lc = supported_kfac_layers(LayerCollection.from_model(model))
+            elif "kfac" in args.repr:
+                repr = partial(PMatKFAC, strategy=args.strategy)
+                lc = supported_kfac_layers(LayerCollection.from_model(model))
+            elif "bd" in args.repr:
+                repr = PMatBlockDiag
+                lc = supported_kfac_layers(LayerCollection.from_model(model))
+                # lc = LayerCollection.from_model(model)
+            elif "lr" in args.repr:
+                repr = PMatLowRank
+                lc = supported_kfac_layers(LayerCollection.from_model(model))
+                # lc = LayerCollection.from_model(model)
+
+            F = FIM(
+                model,
+                DataLoader(noisy_train_set, batch_size=128, shuffle=False),
+                repr,
+                "classif_logits",
+                device=args.device,
+                layer_collection=lc,
+                verbose=True,
+            )
+        elif "K" in args.repr:
+            generator = TorchHooksJacobianBackend(
+                model, func, centering=False, verbose=True
+            )
+            F = FMatDense(
+                lc,
+                generator,
+                examples=DataLoader(noisy_train_set, batch_size=128, shuffle=False),
+            )
 
         if hasattr(F, "update_diag"):
             F.update_diag(noisy_train)
@@ -271,20 +275,19 @@ for i, (c, d) in enumerate(
         #     return evals, evecs
 
         if args.rank is not None and isinstance(F, PMatLowRank):
-            # _, evals, evecs = torch.svd_lowrank(
-            #     F.data.view(-1, F.size(1)), q=20 + args.rank, niter=20
-            # )
+            _, evals, evecs = torch.svd_lowrank(
+                F.data.view(-1, F.size(1)), q=20 + args.rank, niter=20
+            )
             # evals = evals**2
             # evals, evecs = rnystroem(F, k=args.rank)
             # evals = evals**2
-            F.compute_eigendecomposition(impl="gram_eigh")
-            evals, evecs = F.get_eigendecomposition()
+            # F.compute_eigendecomposition(impl="gram_eigh")
+            # evals, evecs = F.get_eigendecomposition()
 
         # %%
+
         if args.rank is not None and isinstance(F, PMatLowRank):
-            print(evecs.shape)
             lr_evals, lr_evecs = evals[-args.rank :], evecs[:, -args.rank :]
-            print(evals)
             F_old = F
             F = PMatLowRank(
                 F.layer_collection,
@@ -295,11 +298,11 @@ for i, (c, d) in enumerate(
             F.evecs = lr_evecs
         # %%
         avg_lam = (F.trace() / F.layer_collection.numel()).item()
-        regul = avg_lam * args.regul
-        light_noisy_noaug = DataLoader(noisy_train_set, batch_size=64, shuffle=False)
+        regul = args.regul
+        light_noisy_noaug = DataLoader(noisy_train_set, batch_size=32, shuffle=False)
 
-        self_influence = []
-        self_influence_loo = []
+        self_influences = []
+        self_influences_loo = []
         leverages = []
         leverages_loo = []
         det_schurs = []
@@ -322,7 +325,7 @@ for i, (c, d) in enumerate(
                 FinvG = F.solve(
                     pfmap_grad, regul=regul, solve="eigendecomposition"
                 ).to_torch()
-                si = torch.einsum(
+                self_influence = torch.einsum(
                     "onp, Onp->noO",
                     pfmap_grad.to_torch(),
                     FinvG,
@@ -342,11 +345,11 @@ for i, (c, d) in enumerate(
                     pfmap_func.to_torch(),
                     FinvG,
                 )
-                self_influence.append(si)
+                self_influences.append(self_influence)
                 schur = torch.eye(downdate.shape[-1], device=args.device) - downdate
                 loo_effect = torch.linalg.solve(schur, cross)
-                si_loo = cross.transpose(1, 2) @ loo_effect
-                self_influence_loo.append(si + si_loo)
+                self_influence_loo = cross.transpose(1, 2) @ loo_effect
+                self_influences_loo.append(self_influence + self_influence_loo)
                 FinvJ = F.solve(
                     pfmap_func, regul=regul, solve="eigendecomposition"
                 ).to_torch()
@@ -361,39 +364,17 @@ for i, (c, d) in enumerate(
                     + leverage @ torch.linalg.solve(schur, leverage.transpose(1, 2))
                 )
                 det_schurs.append(torch.logdet(schur))
-                cooks.append(si + si_loo + loo_effect.transpose(1, 2) @ loo_effect)
-        elif isinstance(F, FMatDense):
-            alpha = F.solve(
-                FVector(
-                    (
-                        torch.nn.functional.one_hot(
-                            noisy_train_set.tensors[1],
-                            num_classes=len(classes),
-                        ).to(dtype=torch.float32, device=args.device)
-                    )
-                    - torch.softmax(
-                        model(noisy_train_set.tensors[0].to(device=args.device)), dim=1
-                    )
-                ),
-                regul=regul,
-            )
-            Q = F.inv(regul=regul).to_torch()
-            self_influence_loo.append(
-                (
-                    torch.linalg.solve(
-                        torch.diagonal(Q, dim1=1, dim2=3).permute(2, 0, 1),
-                        alpha.to_torch().t().unsqueeze(-1),
-                    ).squeeze(-1)
-                    ** 2
-                ).sum(dim=-1)
-            )
-
+                cooks.append(
+                    self_influence
+                    + self_influence_loo
+                    + loo_effect.transpose(1, 2) @ loo_effect
+                )
         elif isinstance(F, PMatEKFAC):
             evecs, evals = F.data
 
             for inputs, targets in tqdm(light_noisy_noaug):
-                si = []
-                si_loo = []
+                self_influence = []
+                self_influence_loo = []
                 leverage = []
                 leverage_loo = []
                 cook = []
@@ -436,9 +417,11 @@ for i, (c, d) in enumerate(
 
                     Gkfe_scaled = Gkfe / (evals[layer_id].view(1, 1, *sG[2:]) + regul)
 
-                    si.append(torch.einsum("onij, Onij->noO", Gkfe_scaled, Gkfe))
+                    self_influence.append(
+                        torch.einsum("onij, Onij->noO", Gkfe_scaled, Gkfe)
+                    )
 
-                    si_loo.append(
+                    self_influence_loo.append(
                         torch.einsum(
                             "onij, Onij->noO",
                             Gkfe
@@ -483,8 +466,12 @@ for i, (c, d) in enumerate(
                         )
                     )
 
-                self_influence.append(torch.stack(si, dim=0).detach().cpu())
-                self_influence_loo.append(torch.stack(si_loo, dim=0).detach().cpu())
+                self_influences.append(
+                    torch.stack(self_influence, dim=0).detach().cpu()
+                )
+                self_influences_loo.append(
+                    torch.stack(self_influence_loo, dim=0).detach().cpu()
+                )
                 leverages.append(torch.stack(leverage, dim=0).detach().cpu())
                 leverages_loo.append(torch.stack(leverage_loo, dim=0).detach().cpu())
                 cooks.append(torch.stack(cook, dim=0).detach().cpu())
@@ -502,30 +489,18 @@ for i, (c, d) in enumerate(
                 else:
                     pi = 1
 
-                A = ((N**0.5) * A) + (
-                    regul**0.5
-                    * pi
-                    * torch.eye(A.shape[0], device=A.device, dtype=A.dtype)
-                )
-
-                G = ((N**0.5) * G) + (
-                    regul**0.5
-                    / pi
-                    * torch.eye(G.shape[0], device=G.device, dtype=G.dtype)
-                )
+                def whitener(A, damp):
+                    evals, evecs = torch.linalg.eigh(A)
+                    inv_sqrt = (evals.clip(min=0) + damp).rsqrt()
+                    return evecs * inv_sqrt
 
                 cache[layer_id] = {
-                    "LA": torch.linalg.cholesky(A),
-                    "LG": torch.linalg.cholesky(G),
+                    "LA": whitener(N**0.5 * A, regul**0.5 * pi),
+                    "LG": whitener(N**0.5 * G, regul**0.5 / pi),
                 }
 
-            def solve(A, b):
-                return torch.cholesky_solve(b, A)
-
             def whiten(L, x):
-                return torch.linalg.solve_triangular(
-                    L, x.transpose(-1, -2), upper=False
-                ).transpose(-1, -2)
+                return x @ L
 
             def woodbury_solve(U, b):
                 if U.size(-1) <= U.size(-2):
@@ -541,8 +516,8 @@ for i, (c, d) in enumerate(
                     return b + cross @ torch.linalg.solve(schur, U)
 
             for inputs, targets in tqdm(light_noisy_noaug):
-                si = []
-                si_loo = []
+                self_influence = []
+                self_influence_loo = []
                 leverage = []
                 leverage_loo = []
                 cook = []
@@ -567,7 +542,7 @@ for i, (c, d) in enumerate(
                     Ga_w = whiten(cache[layer_id]["LA"], Ga)
                     Gg_w = whiten(cache[layer_id]["LG"], Gg)
 
-                    si.append(
+                    self_influence.append(
                         torch.einsum(
                             "onsg,OnSg,nsa,nSa->noO",
                             Gg_w,
@@ -615,7 +590,7 @@ for i, (c, d) in enumerate(
                         Jg_w.size(3),
                     ).permute(1, 0, 2, 3)
 
-                    si_loo.append(
+                    self_influence_loo.append(
                         torch.einsum(
                             "onsg,OnSg,nsa,nSa->noO",
                             Gg_w_loo,
@@ -643,8 +618,12 @@ for i, (c, d) in enumerate(
                         )
                     )
 
-                self_influence.append(torch.stack(si, dim=0).detach().cpu())
-                self_influence_loo.append(torch.stack(si_loo, dim=0).detach().cpu())
+                self_influences.append(
+                    torch.stack(self_influence, dim=0).detach().cpu()
+                )
+                self_influences_loo.append(
+                    torch.stack(self_influence_loo, dim=0).detach().cpu()
+                )
                 leverages.append(torch.stack(leverage, dim=0).detach().cpu())
                 leverages_loo.append(torch.stack(leverage_loo, dim=0).detach().cpu())
                 cooks.append(torch.stack(cook, dim=0).detach().cpu())
@@ -665,8 +644,8 @@ for i, (c, d) in enumerate(
                     return torch.cholesky_solve(B, A)
 
             for inputs, targets in tqdm(light_noisy_noaug):
-                si = []
-                si_loo = []
+                self_influence = []
+                self_influence_loo = []
                 pfmap_func = Jacobian(
                     model,
                     (inputs, targets),
@@ -720,11 +699,11 @@ for i, (c, d) in enumerate(
                         torch.eye(block_leverage.shape[-1], device=args.device)
                         - block_leverage
                     )
-                    si.append(block_si)
+                    self_influence.append(block_si)
                     loo_effect = torch.linalg.solve(
                         block_schur, block_cross.transpose(1, 2)
                     )
-                    si_loo.append(block_si + block_cross @ loo_effect)
+                    self_influence_loo.append(block_si + block_cross @ loo_effect)
                     leverage.append(block_leverage)
                     leverage_loo.append(
                         torch.linalg.solve(block_schur, block_leverage.transpose(1, 2))
@@ -738,8 +717,12 @@ for i, (c, d) in enumerate(
 
                 leverages.append(torch.stack(leverage, dim=0).detach().cpu())
                 leverages_loo.append(torch.stack(leverage_loo, dim=0).detach().cpu())
-                self_influence.append(torch.stack(si, dim=0).detach().cpu())
-                self_influence_loo.append(torch.stack(si_loo, dim=0).detach().cpu())
+                self_influences.append(
+                    torch.stack(self_influence, dim=0).detach().cpu()
+                )
+                self_influences_loo.append(
+                    torch.stack(self_influence_loo, dim=0).detach().cpu()
+                )
                 det_schurs.append(torch.stack(det_schur, dim=0).detach().cpu())
                 cooks.append(torch.stack(cook, dim=0).detach().cpu())
 
@@ -757,7 +740,7 @@ for i, (c, d) in enumerate(
                     function=loss,
                     layer_collection=lc,
                 )
-                si = torch.einsum(
+                self_influence = torch.einsum(
                     "onp, Onp->noO",
                     pfmap_grad.to_torch(),
                     F.solve(pfmap_grad, regul=regul).to_torch(),
@@ -773,41 +756,41 @@ for i, (c, d) in enumerate(
                     pfmap_grad.to_torch(),
                     FinvJ,
                 )
-                self_influence.append(si)
+                self_influences.append(self_influence)
                 schur = torch.eye(leverage.shape[-1], device=args.device) - leverage
                 loo_effect = torch.linalg.solve(schur, cross.transpose(1, 2))
-                self_influence_loo.append(si + cross @ loo_effect)
+                self_influences_loo.append(self_influence + cross @ loo_effect)
                 leverages.append(leverage)
                 leverages_loo.append(
                     torch.linalg.solve(schur, leverage.transpose(1, 2))
                 )
                 det_schurs.append(torch.logdet(schur))
                 cooks.append(
-                    si + cross @ loo_effect + loo_effect.transpose(1, 2) @ loo_effect
+                    self_influence
+                    + cross @ loo_effect
+                    + loo_effect.transpose(1, 2) @ loo_effect
                 )
 
         # %%
-        if self_influence[0].ndim == 3:
-            self_influence = torch.cat(self_influence, dim=0)[None, ...]
-            self_influence_loo = torch.cat(self_influence_loo, dim=0)[None, ...]
+        if self_influences[0].ndim == 3:
+            self_influences = torch.cat(self_influences, dim=0)[None, ...]
+            self_influences_loo = torch.cat(self_influences_loo, dim=0)[None, ...]
             leverages = torch.cat(leverages, dim=0)[None, ...]
             leverages_loo = torch.cat(leverages_loo, dim=0)[None, ...]
             cooks = torch.cat(cooks, dim=0)[None, ...]
         else:
-            self_influence = torch.cat(self_influence, dim=1)
-            self_influence_loo = torch.cat(self_influence_loo, dim=1)
+            self_influences = torch.cat(self_influences, dim=1)
+            self_influences_loo = torch.cat(self_influences_loo, dim=1)
             leverages = torch.cat(leverages, dim=1)
             leverages_loo = torch.cat(leverages_loo, dim=1)
             cooks = torch.cat(cooks, dim=1)
 
         # %%
-        losses = []
         margins = []
         confidences = []
         for inputs, targets in tqdm(light_noisy_noaug):
             with torch.no_grad():
                 outputs = model(inputs)
-                losses.append(tF.cross_entropy(outputs, targets, reduction="none"))
                 p = torch.softmax(outputs, dim=1)
                 mask = torch.zeros_like(p, dtype=bool)
                 mask[torch.arange(len(targets)), targets] = True
@@ -815,19 +798,33 @@ for i, (c, d) in enumerate(
                     p[mask] - p[~mask].reshape(len(targets), -1).max(axis=1)[0]
                 )
                 confidences.append(p[mask])
-        losses = torch.cat(losses)
         margins = -torch.cat(margins)
-        confidences = torch.cat(confidences)
+        confidences = -torch.cat(confidences)
+
+        for scores in [margins, confidences]:
+            print(roc_auc_score(noisy_examples, scores.numpy(force=True)))
+
+        for scores in [
+            self_influences,
+            self_influences_loo,
+            cooks,
+            leverages,
+            leverages_loo,
+        ]:
+            print(
+                roc_auc_score(
+                    noisy_examples,
+                    torch.diagonal(scores, dim1=-2, dim2=-1)
+                    .sum(dim=-1)
+                    .sum(dim=0)
+                    .numpy(force=True),
+                )
+            )
 
         with h5py.File(
             os.path.join(args.output_dir, f"{result_file_name(args)}.h5"), "a"
         ) as f:
-            if "runs" in f:
-                for run_name in f["runs"].keys():
-                    start = int(run_name.split("_")[-1])
-            else:
-                start = 0
-            run = f.require_group(f"runs/run_{i + start}")
+            run = f.require_group(f"runs/run_{i}")
             run.attrs.update(
                 {
                     "h": 4,
@@ -857,14 +854,15 @@ for i, (c, d) in enumerate(
             )
 
             metrics = epoch.require_group("metrics")
-            metrics.create_dataset("self-influence", data=self_influence.detach().cpu())
             metrics.create_dataset(
-                "self-influence-loo", data=self_influence_loo.detach().cpu()
+                "self_influence", data=self_influences.detach().cpu()
+            )
+            metrics.create_dataset(
+                "self_influence_loo", data=self_influences_loo.detach().cpu()
             )
             metrics.create_dataset("cook", data=cooks.detach().cpu())
             metrics.create_dataset("leverage", data=leverages.detach().cpu())
-            metrics.create_dataset("leverage-loo", data=leverages_loo.detach().cpu())
-            metrics.create_dataset("losses", data=losses.detach().cpu())
+            metrics.create_dataset("leverage_loo", data=leverages_loo.detach().cpu())
             metrics.create_dataset("margins", data=margins.detach().cpu())
             metrics.create_dataset("confidences", data=confidences.detach().cpu())
             if "noisy_examples" not in run:
