@@ -155,7 +155,7 @@ for i, (c, d) in enumerate(
     optimizer = optimizer_fn(model.parameters())
 
     old_epochs = 0
-    epochs = 1
+    epochs = 10
     while epochs <= args.epochs:
         fit(
             model_clean,
