@@ -80,7 +80,6 @@ args.regul = 1e-5
 args.epochs = 1000
 args.repr = "F_kfac"
 args.seed = 1337
-args.output_dir = "mislabeled-output"
 args.rank = 1000
 args.use_pi = True
 args.strategy = "kfac"
@@ -166,10 +165,10 @@ for i, (c, d) in enumerate(
             args.device,
             augmentations=augmentations,
         )
-        print(eval(model, train, args.device))
-        print(eval(model, test, args.device))
-        gold_train_accuracy, gold_train_loss = eval(model, train, args.device)
-        gold_test_accuracy, gold_test_loss = eval(model, test, args.device)
+        gold_train_accuracy, gold_train_loss = eval(model_clean, train, args.device)
+        gold_test_accuracy, gold_test_loss = eval(model_clean, test, args.device)
+        print(gold_train_accuracy, gold_train_loss)
+        print(gold_test_accuracy, gold_test_loss)
 
         fit(
             model,
@@ -179,11 +178,11 @@ for i, (c, d) in enumerate(
             args.device,
             augmentations=augmentations,
         )
-        print(eval(model, noisy_train, args.device))
-        print(eval(model, train, args.device))
-        print(eval(model, test, args.device))
         none_train_accuracy, none_train_loss = eval(model, test, args.device)
         none_test_accuracy, none_test_loss = eval(model, test, args.device)
+        print(none_train_accuracy, none_train_loss)
+        print(none_test_accuracy, none_test_loss)
+
         # %%
 
         if "ekfac" in args.repr:
