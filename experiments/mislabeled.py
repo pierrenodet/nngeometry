@@ -76,7 +76,7 @@ args = parser.parse_args()
 
 args.dataset = "mnist-1d"
 args.runs = 1
-args.regul = 1e-5
+args.regul = 1e-3
 args.epochs = 1000
 args.repr = "F_kfac"
 args.seed = 1337
@@ -155,7 +155,7 @@ for i, (c, d) in enumerate(
     optimizer = optimizer_fn(model.parameters())
 
     old_epochs = 0
-    epochs = 10
+    epochs = 1
     while epochs <= args.epochs:
         fit(
             model_clean,
@@ -178,8 +178,10 @@ for i, (c, d) in enumerate(
             args.device,
             augmentations=augmentations,
         )
-        none_train_accuracy, none_train_loss = eval(model, test, args.device)
+        none_ntrain_accuracy, none_ntrain_loss = eval(model, noisy_train, args.device)
+        none_train_accuracy, none_train_loss = eval(model, train, args.device)
         none_test_accuracy, none_test_loss = eval(model, test, args.device)
+        print(none_ntrain_accuracy, none_ntrain_loss)
         print(none_train_accuracy, none_train_loss)
         print(none_test_accuracy, none_test_loss)
 
@@ -243,10 +245,10 @@ for i, (c, d) in enumerate(
             if hasattr(F, "__rmul__"):
                 F = N * F
         if isinstance(F, PMatKFAC) and args.strategy == "kfac":  # kfac
-            for layer_id, layer in tqdm(lc.layers.items()):
-                A, G_w = F.data[layer_id]
+            for layer_id, layer in lc.layers.items():
+                A, G = F.data[layer_id]
                 A /= (len(classes) - 1) ** 0.5
-                G_w *= (len(classes) - 1) ** 0.5
+                G *= (len(classes) - 1) ** 0.5
 
         # def rnystroem(A, k, regul=1e-8):
         #     lc = A.layer_collection
@@ -293,6 +295,7 @@ for i, (c, d) in enumerate(
             F.evecs = lr_evecs
         # %%
         avg_lam = (F.trace() / F.layer_collection.numel()).item()
+        regul = avg_lam * args.regul
         light_noisy_noaug = DataLoader(noisy_train_set, batch_size=64, shuffle=False)
 
         self_influence = []
@@ -317,7 +320,7 @@ for i, (c, d) in enumerate(
                     layer_collection=lc,
                 )
                 FinvG = F.solve(
-                    pfmap_grad, regul=args.regul, solve="eigendecomposition"
+                    pfmap_grad, regul=regul, solve="eigendecomposition"
                 ).to_torch()
                 si = torch.einsum(
                     "onp, Onp->noO",
@@ -329,7 +332,7 @@ for i, (c, d) in enumerate(
                     pfmap_func.to_torch(),
                     F.solve(
                         pfmap_func,
-                        regul=args.regul,
+                        regul=regul,
                         solve="eigendecomposition",
                         rcond=0,
                     ).to_torch(),
@@ -345,7 +348,7 @@ for i, (c, d) in enumerate(
                 si_loo = cross.transpose(1, 2) @ loo_effect
                 self_influence_loo.append(si + si_loo)
                 FinvJ = F.solve(
-                    pfmap_func, regul=args.regul, solve="eigendecomposition"
+                    pfmap_func, regul=regul, solve="eigendecomposition"
                 ).to_torch()
                 leverage = torch.einsum(
                     "onp, Onp->noO",
@@ -372,9 +375,9 @@ for i, (c, d) in enumerate(
                         model(noisy_train_set.tensors[0].to(device=args.device)), dim=1
                     )
                 ),
-                regul=args.regul,
+                regul=regul,
             )
-            Q = F.inv(regul=args.regul).to_torch()
+            Q = F.inv(regul=regul).to_torch()
             self_influence_loo.append(
                 (
                     torch.linalg.solve(
@@ -431,9 +434,7 @@ for i, (c, d) in enumerate(
 
                     sG = Gkfe.size()
 
-                    Gkfe_scaled = Gkfe / (
-                        evals[layer_id].view(1, 1, *sG[2:]) + args.regul
-                    )
+                    Gkfe_scaled = Gkfe / (evals[layer_id].view(1, 1, *sG[2:]) + regul)
 
                     si.append(torch.einsum("onij, Onij->noO", Gkfe_scaled, Gkfe))
 
@@ -442,7 +443,7 @@ for i, (c, d) in enumerate(
                             "onij, Onij->noO",
                             Gkfe
                             / (
-                                (evals[layer_id].view(1, 1, *sG[2:]) + args.regul)
+                                (evals[layer_id].view(1, 1, *sG[2:]) + regul)
                                 - (Jkfe**2).sum(dim=0)
                             ),
                             Gkfe,
@@ -451,7 +452,7 @@ for i, (c, d) in enumerate(
                     leverage.append(
                         torch.einsum(
                             "onij, Onij->noO",
-                            Jkfe / (evals[layer_id].view(1, 1, *sG[2:]) + args.regul),
+                            Jkfe / (evals[layer_id].view(1, 1, *sG[2:]) + regul),
                             Jkfe,
                         )
                     )
@@ -461,7 +462,7 @@ for i, (c, d) in enumerate(
                             Jkfe
                             / (
                                 evals[layer_id].view(1, 1, *sG[2:])
-                                + args.regul
+                                + regul
                                 - (Jkfe**2).sum(dim=0)
                             ),
                             Jkfe,
@@ -474,7 +475,7 @@ for i, (c, d) in enumerate(
                             * evals[layer_id].view(1, 1, *sG[2:])
                             / (
                                 evals[layer_id].view(1, 1, *sG[2:])
-                                + args.regul
+                                + regul
                                 - (Jkfe**2).sum(dim=0)
                             )
                             ** 2,
@@ -502,13 +503,13 @@ for i, (c, d) in enumerate(
                     pi = 1
 
                 A = ((N**0.5) * A) + (
-                    args.regul**0.5
+                    regul**0.5
                     * pi
                     * torch.eye(A.shape[0], device=A.device, dtype=A.dtype)
                 )
 
                 G = ((N**0.5) * G) + (
-                    args.regul**0.5
+                    regul**0.5
                     / pi
                     * torch.eye(G.shape[0], device=G.device, dtype=G.dtype)
                 )
@@ -654,7 +655,7 @@ for i, (c, d) in enumerate(
             for layer_id, layer in tqdm(lc.layers.items()):
                 block = F.data[layer_id]
 
-                block_reg = block + args.regul * torch.eye(
+                block_reg = block + regul * torch.eye(
                     block.shape[0], dtype=block.dtype, device=block.device
                 )
 
@@ -759,9 +760,9 @@ for i, (c, d) in enumerate(
                 si = torch.einsum(
                     "onp, Onp->noO",
                     pfmap_grad.to_torch(),
-                    F.solve(pfmap_grad, regul=args.regul).to_torch(),
+                    F.solve(pfmap_grad, regul=regul).to_torch(),
                 )
-                FinvJ = F.solve(pfmap_func, regul=args.regul).to_torch()
+                FinvJ = F.solve(pfmap_func, regul=regul).to_torch()
                 leverage = torch.einsum(
                     "onp, Onp->noO",
                     pfmap_func.to_torch(),
@@ -821,7 +822,12 @@ for i, (c, d) in enumerate(
         with h5py.File(
             os.path.join(args.output_dir, f"{result_file_name(args)}.h5"), "a"
         ) as f:
-            run = f.require_group(f"runs/run_{i}")
+            if "runs" in f:
+                for run_name in f["runs"].keys():
+                    start = int(run_name.split("_")[-1])
+            else:
+                start = 0
+            run = f.require_group(f"runs/run_{i + start}")
             run.attrs.update(
                 {
                     "h": 4,
@@ -830,6 +836,7 @@ for i, (c, d) in enumerate(
                     "repr": args.repr,
                     "regul": args.regul,
                     "pi": args.use_pi,
+                    "seed": args.seed,
                 }
             )
             epoch = run.require_group(f"epoch_{epochs}")
@@ -839,6 +846,8 @@ for i, (c, d) in enumerate(
                     "gold_test_accuracy": gold_test_accuracy,
                     "gold_train_loss": gold_train_loss,
                     "gold_test_loss": gold_test_loss,
+                    "none_ntrain_accuracy": none_ntrain_accuracy,
+                    "none_ntrain_loss": none_ntrain_loss,
                     "none_train_accuracy": none_train_accuracy,
                     "none_test_accuracy": none_test_accuracy,
                     "none_train_loss": none_train_loss,
