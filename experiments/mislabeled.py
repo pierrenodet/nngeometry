@@ -80,12 +80,11 @@ args.runs = 1
 args.regul = 1e-4
 args.regul_type = "pi"
 args.epochs = 10000
-args.repr = "F_kfac"
+args.repr = "F_ekfac"
 args.seed = 1337
 args.rank = 10
 args.strategy = "kfac"
 args.whiten = "eigh"
-args.device = "mps"
 
 
 os.makedirs(args.output_dir, exist_ok=True)
@@ -157,10 +156,10 @@ epochs = (
     + list(range(1000, args.epochs, 2000))
 )
 # %%
-for i, (c, d) in enumerate(
-    chain(product([32, 64, 128, 256, 512, 1024], [4]), product([256], [2, 4, 8, 16]))
-):
-    # for i, (c, d) in enumerate([(256, 4)]):
+# for i, (c, d) in enumerate(
+#     chain(product([32, 64, 128, 256, 512, 1024], [4]), product([256], [2, 4, 8, 16]))
+# ):
+for i, (c, d) in enumerate([(256, 4)]):
     model_fn = partial(model_fn, c=c, d=d, h=4)
 
     model_clean = deepcopy(model_fn()).to(device=args.device)
@@ -169,12 +168,12 @@ for i, (c, d) in enumerate(
     model = deepcopy(model_fn()).to(device=args.device)
     optimizer = optimizer_fn(model.parameters())
 
-    for i in range(1, len(epochs)):
+    for e in range(1, len(epochs)):
         fit(
             model_clean,
             optimizer_clean,
             train,
-            epochs[i] - epochs[i - 1],
+            epochs[e] - epochs[e - 1],
             args.device,
             augmentations=augmentations,
         )
@@ -187,7 +186,7 @@ for i, (c, d) in enumerate(
             model,
             optimizer,
             noisy_train,
-            epochs[i] - epochs[i - 1],
+            epochs[e] - epochs[e - 1],
             args.device,
             augmentations=augmentations,
         )
@@ -393,91 +392,84 @@ for i, (c, d) in enumerate(
                     (inputs, targets),
                     function=func,
                     layer_collection=lc,
+                    representation=PFMapFactored,
                 )
                 pfmap_grad = Jacobian(
                     model,
                     (inputs, targets),
                     function=loss,
                     layer_collection=lc,
+                    representation=PFMapFactored,
                 )
-                # pfmap_logits = Jacobian(
-                #     model,
-                #     (inputs, targets),
-                #     function=logits,
-                #     layer_collection=lc,
-                # )
-                # with torch.no_grad():
-                #     p = torch.softmax(model(inputs), dim=1)
-                #     y = tF.one_hot(targets, num_classes=len(classes)).float()
                 for layer_id, layer in lc.layers.items():
-                    # Jl = pfmap_logits.to_torch_layer(layer_id)
-                    # Jlkfe = F._proj_to_kfe_batched(Jl, evecs[layer_id], layer)
+                    if args.regul_type == "trace":
+                        regul = args.regul * evals[layer_id].mean()
+                    else:
+                        regul = args.regul
+                    Ga, Gg = pfmap_grad.data[layer_id]
+                    Ja, Jg = pfmap_func.data[layer_id]
 
-                    # mean_Jlkfe = torch.einsum("nc,cnij->nij", p, Jlkfe)
-                    # Jlkfe_centered = Jlkfe - mean_Jlkfe.unsqueeze(0)
-                    # Jkfe = torch.einsum("nc,cnij->cnij", torch.sqrt(p), Jlkfe_centered)
-                    # Gkfe = torch.einsum("nc, cnij->nij", p - y, Jlkfe).unsqueeze(0)
+                    Ga_kfe = Ga @ evecs[layer_id][0]
+                    Gg_kfe = Gg @ evecs[layer_id][1]
 
-                    J_w = pfmap_func.to_torch_layer(layer_id)
-                    Jkfe = F._proj_to_kfe_batched(J_w, evecs[layer_id], layer)
-                    G_w = pfmap_grad.to_torch_layer(layer_id)
-                    Gkfe = F._proj_to_kfe_batched(G_w, evecs[layer_id], layer)
+                    Ja_kfe = Ga_kfe
+                    Jg_kfe = Jg @ evecs[layer_id][1]
 
-                    sG = Gkfe.size()
-
-                    Gkfe_scaled = Gkfe / (evals[layer_id].view(1, 1, *sG[2:]) + regul)
-
-                    self_influence.append(
-                        torch.einsum("onij, Onij->noO", Gkfe_scaled, Gkfe)
+                    D = evals[layer_id].view(Jg_kfe.size(-1), Ja_kfe.size(-1))
+                    D_loo = D - torch.einsum(
+                        "onsg,onSg,nsa,nSa->nga", Jg_kfe, Jg_kfe, Ja_kfe, Ja_kfe
                     )
 
-                    regul = args.regul
-
+                    self_influence.append(
+                        torch.einsum(
+                            "onsg,OnSg,nsa,nSa,ga->noO",
+                            Gg_kfe,
+                            Gg_kfe,
+                            Ga_kfe,
+                            Ga_kfe,
+                            1 / (D + regul),
+                        )
+                    )
                     self_influence_loo.append(
                         torch.einsum(
-                            "onij, Onij->noO",
-                            Gkfe
-                            / (
-                                (evals[layer_id].view(1, 1, *sG[2:]) + regul)
-                                - (Jkfe**2).sum(dim=0)
-                            ),
-                            Gkfe,
+                            "onsg,OnSg,nsa,nSa,nga->noO",
+                            Gg_kfe,
+                            Gg_kfe,
+                            Ga_kfe,
+                            Ga_kfe,
+                            1 / (D_loo + regul),
                         )
                     )
                     leverage.append(
                         torch.einsum(
-                            "onij, Onij->noO",
-                            Jkfe / (evals[layer_id].view(1, 1, *sG[2:]) + regul),
-                            Jkfe,
+                            "onsg,OnSg,nsa,nSa,ga->noO",
+                            Jg_kfe,
+                            Jg_kfe,
+                            Ja_kfe,
+                            Ja_kfe,
+                            1 / (D + regul),
                         )
                     )
                     leverage_loo.append(
                         torch.einsum(
-                            "onij, Onij->noO",
-                            Jkfe
-                            / (
-                                evals[layer_id].view(1, 1, *sG[2:])
-                                + regul
-                                - (Jkfe**2).sum(dim=0)
-                            ),
-                            Jkfe,
+                            "onsg,OnSg,nsa,nSa,nga->noO",
+                            Jg_kfe,
+                            Jg_kfe,
+                            Ja_kfe,
+                            Ja_kfe,
+                            1 / (D_loo + regul),
                         )
                     )
                     cook.append(
                         torch.einsum(
-                            "onij, Onij->noO",
-                            Gkfe
-                            * evals[layer_id].view(1, 1, *sG[2:])
-                            / (
-                                evals[layer_id].view(1, 1, *sG[2:])
-                                + regul
-                                - (Jkfe**2).sum(dim=0)
-                            )
-                            ** 2,
-                            Gkfe,
+                            "onsg,OnSg,nsa,nSa,nga->noO",
+                            Gg_kfe,
+                            Gg_kfe,
+                            Ga_kfe,
+                            Ga_kfe,
+                            (D + regul) / (D_loo + regul) ** 2,
                         )
                     )
-
                 self_influences.append(
                     torch.stack(self_influence, dim=0).detach().cpu()
                 )
@@ -873,10 +865,10 @@ for i, (c, d) in enumerate(
                     "regul": args.regul,
                     "regul_type": args.regul_type,
                     "seed": args.seed,
-                    "whiten": args.whiten if "F_kfac" == args.repr else None,
+                    "whiten": args.whiten if "F_kfac" == args.repr else "",
                 }
             )
-            epoch = run.require_group(f"epoch_{epochs}")
+            epoch = run.require_group(f"epoch_{epochs[e]}")
             epoch.attrs.update(
                 {
                     "gold_train_accuracy": gold_train_accuracy,
