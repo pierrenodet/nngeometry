@@ -77,13 +77,14 @@ args = parser.parse_args()
 
 args.dataset = "mnist-1d"
 args.runs = 1
-args.regul = 1e-8
-args.epochs = 1000
+args.regul = 1e-4
+args.regul_type = "pi"
+args.epochs = 10000
 args.repr = "F_kfac"
 args.seed = 1337
 args.rank = 10
-args.use_pi = True
 args.strategy = "kfac"
+args.whiten = "eigh"
 args.device = "mps"
 
 
@@ -148,10 +149,18 @@ noisy_train_set.tensors[1][noisy_examples] = noisy_labels
 
 noisy_train = DataLoader(noisy_train_set, batch_size=128, shuffle=True)
 
+epochs = (
+    [0]
+    + [1]
+    + [10]
+    + list(range(100, 1000, 100))
+    + list(range(1000, args.epochs, 2000))
+)
 # %%
 for i, (c, d) in enumerate(
-    chain(product([32, 64, 128, 256, 512, 1024], [4]), product([512], [2, 4, 8, 16]))
+    chain(product([32, 64, 128, 256, 512, 1024], [4]), product([256], [2, 4, 8, 16]))
 ):
+    # for i, (c, d) in enumerate([(256, 4)]):
     model_fn = partial(model_fn, c=c, d=d, h=4)
 
     model_clean = deepcopy(model_fn()).to(device=args.device)
@@ -160,14 +169,12 @@ for i, (c, d) in enumerate(
     model = deepcopy(model_fn()).to(device=args.device)
     optimizer = optimizer_fn(model.parameters())
 
-    old_epochs = 0
-    epochs = 1
-    while epochs <= args.epochs:
+    for i in range(1, len(epochs)):
         fit(
             model_clean,
             optimizer_clean,
             train,
-            epochs - old_epochs,
+            epochs[i] - epochs[i - 1],
             args.device,
             augmentations=augmentations,
         )
@@ -180,7 +187,7 @@ for i, (c, d) in enumerate(
             model,
             optimizer,
             noisy_train,
-            epochs - old_epochs,
+            epochs[i] - epochs[i - 1],
             args.device,
             augmentations=augmentations,
         )
@@ -251,8 +258,8 @@ for i, (c, d) in enumerate(
         if isinstance(F, PMatKFAC) and args.strategy == "kfac":  # kfac
             for layer_id, layer in lc.layers.items():
                 A, G = F.data[layer_id]
-                A /= (len(classes) - 1) ** 0.5
-                G *= (len(classes) - 1) ** 0.5
+                A *= (1 / (len(classes) - 1)) ** 0.5
+                G *= (1 * (len(classes) - 1)) ** 0.5
 
         # def rnystroem(A, k, regul=1e-8):
         #     lc = A.layer_collection
@@ -298,7 +305,6 @@ for i, (c, d) in enumerate(
             F.evecs = lr_evecs
         # %%
         avg_lam = (F.trace() / F.layer_collection.numel()).item()
-        regul = args.regul
         light_noisy_noaug = DataLoader(noisy_train_set, batch_size=32, shuffle=False)
 
         self_influences = []
@@ -307,8 +313,12 @@ for i, (c, d) in enumerate(
         leverages_loo = []
         det_schurs = []
         cooks = []
-        cache = {}
         if isinstance(F, PMatLowRank):
+            if args.regul_type == "trace":
+                regul = args.regul * avg_lam
+            else:
+                regul = args.regul
+
             for inputs, targets in tqdm(light_noisy_noaug):
                 pfmap_func = Jacobian(
                     model,
@@ -421,6 +431,8 @@ for i, (c, d) in enumerate(
                         torch.einsum("onij, Onij->noO", Gkfe_scaled, Gkfe)
                     )
 
+                    regul = args.regul
+
                     self_influence_loo.append(
                         torch.einsum(
                             "onij, Onij->noO",
@@ -477,30 +489,48 @@ for i, (c, d) in enumerate(
                 cooks.append(torch.stack(cook, dim=0).detach().cpu())
 
         elif isinstance(F, PMatKFAC) and args.strategy == "kfac":
-            cache = {}
-
-            for layer_id, layer in tqdm(lc.layers.items()):
-                A, G = F.data[layer_id]
-
-                if args.use_pi:
-                    pi = (
-                        torch.trace(A) / torch.trace(G) * G.size(0) / A.size(0)
-                    ) ** 0.5
-                else:
-                    pi = 1
+            if args.whiten == "eigh":
 
                 def whitener(A, damp):
                     evals, evecs = torch.linalg.eigh(A)
                     inv_sqrt = (evals.clip(min=0) + damp).rsqrt()
                     return evecs * inv_sqrt
 
-                cache[layer_id] = {
-                    "LA": whitener(N**0.5 * A, regul**0.5 * pi),
-                    "LG": whitener(N**0.5 * G, regul**0.5 / pi),
-                }
+                def whiten(L, x):
+                    return x @ L
 
-            def whiten(L, x):
-                return x @ L
+            elif args.whiten == "cholesky":
+
+                def whitener(A, damp):
+                    return torch.linalg.cholesky(
+                        A + damp * torch.eye(A.size(0), device=A.device, dtype=A.dtype)
+                    )
+
+                def whiten(L, x):
+                    return torch.linalg.solve_triangular(
+                        L, x.transpose(-1, -2), upper=False
+                    ).transpose(-1, -2)
+
+            cache = {}
+
+            for layer_id, layer in tqdm(lc.layers.items()):
+                A, G = F.data[layer_id]
+
+                if args.regul_type == "trace":
+                    A_reg = torch.trace(A) / A.size(0)
+                    G_reg = torch.trace(G) / G.size(0)
+                if args.regul_type == "pi":
+                    pi = torch.trace(A) / torch.trace(G) * G.size(0) / G.size(0)
+                    A_reg = pi
+                    G_reg = 1 / pi
+                else:
+                    A_reg = 1
+                    G_reg = 1
+
+                cache[layer_id] = {
+                    "LA": whitener(A, args.regul**0.5 * A_reg**0.5),
+                    "LG": whitener(G, args.regul**0.5 * G_reg**0.5),
+                }
 
             def woodbury_solve(U, b):
                 if U.size(-1) <= U.size(-2):
@@ -565,7 +595,7 @@ for i, (c, d) in enumerate(
                         )
                     )
 
-                    Ga_w_loo = woodbury_solve(Ja_w, Ga_w)
+                    Ga_w_loo = woodbury_solve(Ja_w * N**-0.25, Ga_w)
                     Ja_w_loo = Ga_w_loo
                     Gg_w_flat = Gg_w.permute(1, 0, 2, 3).reshape(
                         Gg_w.size(1), -1, Gg_w.size(3)
@@ -574,7 +604,7 @@ for i, (c, d) in enumerate(
                         Jg_w.size(1), -1, Jg_w.size(3)
                     )
                     Gg_w_loo_flat, Jg_w_loo_flat = woodbury_solve(
-                        Jg_w_flat,
+                        Jg_w_flat * N**-0.25,
                         torch.cat((Gg_w_flat, Jg_w_flat), dim=1),
                     ).split((Gg_w_flat.size(1), Jg_w_flat.size(1)), dim=1)
                     Gg_w_loo = Gg_w_loo_flat.reshape(
@@ -634,11 +664,16 @@ for i, (c, d) in enumerate(
             for layer_id, layer in tqdm(lc.layers.items()):
                 block = F.data[layer_id]
 
-                block_reg = block + regul * torch.eye(
-                    block.shape[0], dtype=block.dtype, device=block.device
-                )
+                if args.regul_type == "trace":
+                    regul = args.regul * torch.trace(block) / block.size(0)
+                else:
+                    regul = args.regul
 
-                cache[layer_id] = torch.linalg.cholesky(block_reg)
+                cache[layer_id] = torch.linalg.cholesky(
+                    block
+                    + regul
+                    * torch.eye(block.shape[0], dtype=block.dtype, device=block.device)
+                )
 
                 def solve(A, B):
                     return torch.cholesky_solve(B, A)
@@ -727,6 +762,10 @@ for i, (c, d) in enumerate(
                 cooks.append(torch.stack(cook, dim=0).detach().cpu())
 
         elif isinstance(F, PMatDense):
+            if args.regul_type == "trace":
+                regul = args.regul * avg_lam
+            else:
+                regul = args.regul
             for inputs, targets in tqdm(light_noisy_noaug):
                 pfmap_func = Jacobian(
                     model,
@@ -832,8 +871,9 @@ for i, (c, d) in enumerate(
                     "d": d,
                     "repr": args.repr,
                     "regul": args.regul,
-                    "pi": args.use_pi,
+                    "regul_type": args.regul_type,
                     "seed": args.seed,
+                    "whiten": args.whiten if "F_kfac" == args.repr else None,
                 }
             )
             epoch = run.require_group(f"epoch_{epochs}")
@@ -867,6 +907,3 @@ for i, (c, d) in enumerate(
             metrics.create_dataset("confidences", data=confidences.detach().cpu())
             if "noisy_examples" not in run:
                 run.create_dataset("noisy_examples", data=noisy_examples.detach().cpu())
-
-        old_epochs = epochs
-        epochs *= 10
