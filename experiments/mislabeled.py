@@ -77,10 +77,7 @@ args = parser.parse_args()
 
 args.dataset = "mnist-1d"
 args.runs = 1
-args.regul = 1e-4
-args.regul_type = "pi"
-args.epochs = 10000
-args.repr = "F_ekfac"
+args.regul_type = "trace"
 args.seed = 1337
 args.rank = 10
 args.strategy = "kfac"
@@ -153,13 +150,12 @@ epochs = (
     + [1]
     + [10]
     + list(range(100, 1000, 100))
-    + list(range(1000, args.epochs, 2000))
+    + list(range(1000, args.epochs + 1, 2000))
 )
 # %%
-# for i, (c, d) in enumerate(
-#     chain(product([32, 64, 128, 256, 512, 1024], [4]), product([256], [2, 4, 8, 16]))
-# ):
-for i, (c, d) in enumerate([(256, 4)]):
+for i, (c, d) in enumerate(
+    chain(product([256], [2, 4, 8, 16]), product([32, 64, 128, 256, 512, 1024], [4]))
+):
     model_fn = partial(model_fn, c=c, d=d, h=4)
 
     model_clean = deepcopy(model_fn()).to(device=args.device)
@@ -239,8 +235,12 @@ for i, (c, d) in enumerate([(256, 4)]):
             )
         elif "K" in args.repr:
             generator = TorchHooksJacobianBackend(
-                model, func, centering=False, verbose=True
+                model, logits, centering=False, verbose=True
             )
+            if "last" in args.repr:
+                lc = last_layer(LayerCollection.from_model(model))
+            else:
+                lc = LayerCollection.from_model(model)
             F = FMatDense(
                 lc,
                 generator,
@@ -511,8 +511,8 @@ for i, (c, d) in enumerate([(256, 4)]):
                 if args.regul_type == "trace":
                     A_reg = torch.trace(A) / A.size(0)
                     G_reg = torch.trace(G) / G.size(0)
-                if args.regul_type == "pi":
-                    pi = torch.trace(A) / torch.trace(G) * G.size(0) / G.size(0)
+                elif args.regul_type == "pi":
+                    pi = torch.trace(A) / torch.trace(G) * A.size(0) / G.size(0)
                     A_reg = pi
                     G_reg = 1 / pi
                 else:
