@@ -53,14 +53,21 @@ def test_gram_vs_jacobian():
         # solve
         df1 = random_fvector(jacobian.size(1), jacobian.size(0))
         J = random_pfmap(lc, (jacobian.size(1), jacobian.size(0)))
+        gram.compute_eigendecomposition()
         torch.testing.assert_close(
-            (gram.solve(df1, 1e-3)).to_torch(), (gram.inv(1e-3) @ df1).to_torch()
+            (gram.inv(1e-3, solve="eigendecomposition")).to_torch(),
+            (gram.inv(1e-3, solve="default")).to_torch(),
         )
-        torch.testing.assert_close(
-            (gram.solve(J, 1e-3)).to_torch(), (gram.inv(1e-3) @ J).to_torch()
-        )
+        for solve in ["eigendecomposition", "solve"]:
+            torch.testing.assert_close(
+                (gram.solve(df1, 1e-3, solve=solve)).to_torch(),
+                (gram.inv(1e-3, solve=solve) @ df1).to_torch(),
+            )
+            torch.testing.assert_close(
+                (gram.solve(J, 1e-3, solve=solve)).to_torch(),
+                (gram.inv(1e-3, solve=solve) @ J).to_torch(),
+            )
         with pytest.raises(NotImplementedError):
             gram.solve(gram, solve="prout")
         with pytest.raises(NotImplementedError):
             gram.solve(df1, solve="prout")
-

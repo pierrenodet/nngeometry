@@ -44,9 +44,7 @@ class FMatAbstract(ABC):
         elif isinstance(x, PFMapDense):
             return self.solvePFMap(x, regul=regul, solve=solve, **kwargs)
         else:
-            raise NotImplementedError(
-                "`x` should be an instance of FVector or PFMap"
-            )
+            raise NotImplementedError("`x` should be an instance of FVector or PFMap")
 
 
 class FMatDense(FMatAbstract):
@@ -150,9 +148,15 @@ class FMatDense(FMatAbstract):
 
         return L
 
-    def inv(self, regul=1e-8):
+    def inv(self, regul=1e-8, solve="default"):
         s = self.data.size()
-        Minv = torch.cholesky_inverse(self._cholesky(regul))
+        if solve in ["default", "solve"]:
+            Minv = torch.cholesky_inverse(self._cholesky(regul))
+        elif solve == "eigendecomposition":
+            evals, evecs = self.get_eigendecomposition()
+            Minv = (evecs / (evals + s[1] * regul)) @ evecs.t()
+        else:
+            raise NotImplementedError
 
         return FMatDense(
             layer_collection=self.layer_collection,
@@ -165,6 +169,12 @@ class FMatDense(FMatAbstract):
         v_flat = v.to_torch().view(-1, 1)
         if solve in ["default", "solve"]:
             solution = torch.cholesky_solve(v_flat, self._cholesky(regul))
+        elif solve == "eigendecomposition":
+            evals, evecs = self.get_eigendecomposition()
+            solution = torch.mv(
+                evecs,
+                (torch.mv(evecs.t(), v_flat.view(-1)) / (evals + s[1] * regul)),
+            )
         else:
             raise NotImplementedError
 
@@ -176,6 +186,11 @@ class FMatDense(FMatAbstract):
         J = pfmap.to_torch().view(sJ[0] * sJ[1], -1)
         if solve in ["default", "solve"]:
             solution = torch.cholesky_solve(J, self._cholesky(regul))
+        elif solve == "eigendecomposition":
+            evals, evecs = self.get_eigendecomposition()
+            solution = torch.mm(
+                evecs, torch.mm(evecs.t(), J) / (evals[:, None] + s[1] * regul)
+            )
         else:
             raise NotImplementedError
 
