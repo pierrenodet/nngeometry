@@ -1,0 +1,121 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm,bm}
+\usepackage{siunitx}
+
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\rank}{rank}
+
+\begin{document}
+
+\section{Bound on leverage}
+
+\paragraph{Dense FIM.} Using the singular value decomposition, $\Phi=U \diag(s) V^\top$, of the tangent features, the corresponding hat matrix is:
+
+$$H=U\diag\left(\frac{s^2}{s^2+\lambda}\right)U^\top$$
+
+and the leverage of $x_i$ is:
+
+$$h_{ii}=\sum_j u_{ij}^2\frac{s_j^2}{s_j^2 + \lambda}$$
+
+Since $\forall i$, $0\leq\frac {s_j^2}{s_j^2 + \lambda}\leq1$ and $\sum_j u_{ij}^2\leq1$ because the columns of U are orthonormal, the leverages are bounded between $0$ and $1$, and strictly less than $1$ for $\lambda>0$.
+
+\paragraph{Block-diagonal FIM.}
+With $L$ parameter blocks, $\Phi=[\Phi^{(1)},\dots,\Phi^{(L)}]$, the block-diagonal FIM
+$F^{\mathrm{bd}}=\diag({\Phi^{(l)}}^\top\Phi^{(l)}+\lambda I)$ is
+inverted block by block, so with $\Phi^{(l)}=U^{(l)}\diag(s^{(l)}){V^{(l)}}^\top$,
+\begin{equation*}
+	H = \sum_{l=1}^{L}U^{(l)}\diag\left(\frac{{s^{(l)}}^2}{{s^{(l)}}^2 + \lambda}\right){U^{(l)}}^{\top}
+\end{equation*}
+\begin{equation*}
+  h^{\mathrm{bd}}_{ii}=\sum_{l=1}^L h^{(l)}_{ii}
+  =\sum_{l=1}^L\sum_j {u^{(l)}_{ij}}^2\,\frac{{s^{(l)}_j}^2}{{s^{(l)}_j}^2+\lambda}.
+\end{equation*}
+Using the arguments for the dense FIM for each block $l$, we get that $0\leq h_{ii}^{\text{bd}}<L$
+
+\paragraph{KFAC FIM.}
+With $\tilde{A}^{(l)}$ and $\tilde{D}^{(l)}$ the matrices whose rows are $\tilde{a}^{(l)}_j$ and $\tilde{d}^{(l)}_j$, the tangent features are $\phi^{(l)}_j=\tilde{a}^{(l)}_j\otimes\tilde{d}^{(l)}_j$, with $\tilde{A}^{(l)}=U^{(l)}_A\diag(s^{(l)}_A){V^{(l)}_A}^\top$ and $\tilde{D}^{(l)}=U^{(l)}_D\diag(s^{(l)}_D){V^{(l)}_D}^\top$,
+\begin{equation*}
+	H=\sum_{l=1}^L\left(U^{(l)}_A\diag\left(\frac{{s^{(l)}_A}^2}{{s^{(l)}_A}^2+\lambda_A}\right){U^{(l)}_A}^\top\right)\circ\left(U^{(l)}_D\diag\left(\frac{{s^{(l)}_D}^2}{{s^{(l)}_D}^2+\lambda_D}\right){U^{(l)}_D}^\top\right)
+\end{equation*}
+\begin{equation*}
+	h^{\mathrm{KFAC}}_{ii}=\sum_{l=1}^L\left(\sum_j {u^{(l)}_{A,ij}}^2\,\frac{{s^{(l)}_{A,j}}^2}{{s^{(l)}_{A,j}}^2+\lambda_A}\right)\left(\sum_j {u^{(l)}_{D,ij}}^2\,\frac{{s^{(l)}_{D,j}}^2}{{s^{(l)}_{D,j}}^2+\lambda_D}\right).
+\end{equation*}
+Using the arguments for the dense FIM for each factor, both terms are in $[0,1)$, so $0\leq h^{\mathrm{KFAC}}_{ii}<L$ (at least because no formula involves spatial locations).
+
+\paragraph{EKFAC FIM.}
+In the Kronecker-factored eigenbasis, the tangent features are $\psi^{(l)}_i=\phi^{(l)}_i\left(V^{(l)}_A\otimes V^{(l)}_D\right)$,
+\begin{equation*}
+	h^{\mathrm{EKFAC}}_{ii}=\sum_{l=1}^L\sum_{j}\frac{{\psi^{(l)}_{ij}}^2}{\sum_k{\psi^{(l)}_{kj}}^2+\lambda}
+\end{equation*}
+Each term is in $[0,1)$ since the denominator contains the numerator, so with $P^{(l)}$ the number of parameters of block $l$ (sum over $j$), $0\leq h^{\mathrm{EKFAC}}_{ii}<\sum_{l=1}^L P^{(l)}$.
+
+\section{LOO self-influence}
+$g_i$ is the gradient of the loss with respect to the parameters of the neural network for the example $i$. F is the damped Fisher Matrix over all training data $F=\Phi^{\top}\Phi + \lambda I$
+$$\text{SI}=g_i F^{-1}g_i^{\top}$$
+$$\text{LOO SI}=g_i F^{-1}_{-i}g_i^{\top}$$
+
+In following formulas we will assume that $g_i = -\phi_i r_i$ (works for any GLM models where $r$ is the Pearson residuals), and $h_{ii}=\phi_i F^{-1} \phi_i^{\top}$
+
+\paragraph{Dense FIM.}
+
+\begin{align*}
+	\text{LOO SI}&=g_i F^{-1}_{-i}g_i^{\top}\\
+	&=g_i \left(F - \phi_i^{\top} \phi_i\right)^{-1}g_i^{\top}\\
+	&=g_i (F^{-1} + \frac{F^{-1}\phi_i^{\top}\phi_i F^{-1}}{1 - \phi_i F^{-1} \phi_i^{\top}})g_i^{\top}\\
+	&=\text{SI} + \frac{(g_i F^{-1} \phi_i^{\top})^2}{1- \phi_i F^{-1} \phi_i^{\top}}
+\end{align*}
+
+For GLM: $\text{SI}= r_i^2 h_{ii}$, $\text{LOO SI}= r_i^2 h_{ii} + \frac{r_i^2 h_{ii}^2}{1-h_{ii}}=\frac{r_i^2 h_{ii}}{1-h_{ii}}$
+
+\paragraph{Block Diagonal FIM.}
+
+\begin{align*}
+	\text{LOO SI}&=g_i F^{-1}_{-i}g_i^{\top}\\
+	&=\sum_l^L g^{(l)}_i {F^{(l)}}^{-1}_{-i}{g^{(l)}_i}^{\top}\\
+	&=\sum_l^L \frac{r_i^2 h^{(l)}_{ii}}{1-h^{(l)}_{ii}}\\
+	&\neq\frac{r_i^2  \sum_l^L h^{(l)}_{ii}}{1- \sum_l^L h^{(l)}_{ii}}\\
+	&\neq\frac{r_i^2   h^{\text{bd}}_{ii}}{1- h^{\text{bd}}_{ii}}\\
+\end{align*}
+
+In the case of block diagonal FIM: $F^{\text{bd}}_{-i}\neq F^{\text{bd}} - \phi_i^{\top}\phi_i$, but $F^{\text{bd}}_{-i} = F^{\text{bd}} - \text{blockdiag}\left(..., {\phi^{(l)}}_i^{\top}{\phi^{(l)}}_i, ... \right)$
+
+\paragraph{KFAC FIM.}
+We assume that $g^{(l)}_i=a^{(l)}_i\otimes d^{(l)}_i$ (no spatial locations) and $F=\text{blockdiag}_l\left( A^{(l)}\otimes D^{(l)}\right)$ where $A^{(l)}$ and $D^{(l)}$ are built from the tangent features activations $\tilde{a}^{(l)}_j$ and derivatives $\tilde{d}^{(l)}_j$.
+
+\begin{align*}
+	\text{SI}&=g_i F^{-1}g_i^{\top}\\
+	&=\sum_l^L \left(a^{(l)}_i\otimes d^{(l)}_i\right)\left({A^{(l)}}^{-1}\otimes {D^{(l)}}^{-1}\right)\left(a^{(l)}_i\otimes d^{(l)}_i\right)^{\top}\\
+	&=\sum_l^L \left(a^{(l)}_i {A^{(l)}}^{-1}{a^{(l)}_i}^{\top}\right)\left(d^{(l)}_i {D^{(l)}}^{-1}{d^{(l)}_i}^{\top}\right)\\
+\end{align*}
+
+With $A^{(l)}_{-i}=A^{(l)}-{\tilde{a}^{(l)}_i}^{\top}\tilde{a}^{(l)}_i$ and $D^{(l)}_{-i}=D^{(l)}-{\tilde{d}^{(l)}_i}^{\top}\tilde{d}^{(l)}_i$, Sherman-Morrison on each factor gives:
+
+\begin{align*}
+	a^{(l)}_i {A^{(l)}_{-i}}^{-1}{a^{(l)}_i}^{\top}&=a^{(l)}_i {A^{(l)}}^{-1}{a^{(l)}_i}^{\top}+\frac{\left(a^{(l)}_i {A^{(l)}}^{-1}{\tilde{a}^{(l)}_i}^{\top}\right)^2}{1-\tilde{a}^{(l)}_i {A^{(l)}}^{-1}{\tilde{a}^{(l)}_i}^{\top}}\\
+	d^{(l)}_i {D^{(l)}_{-i}}^{-1}{d^{(l)}_i}^{\top}&=d^{(l)}_i {D^{(l)}}^{-1}{d^{(l)}_i}^{\top}+\frac{\left(d^{(l)}_i {D^{(l)}}^{-1}{\tilde{d}^{(l)}_i}^{\top}\right)^2}{1-\tilde{d}^{(l)}_i {D^{(l)}}^{-1}{\tilde{d}^{(l)}_i}^{\top}}
+\end{align*}
+
+\begin{align*}
+	\text{LOO SI}&=g_i F^{-1}_{-i}g_i^{\top}\\
+	&=\sum_l^L \left(a^{(l)}_i {A^{(l)}_{-i}}^{-1}{a^{(l)}_i}^{\top}\right)\left(d^{(l)}_i {D^{(l)}_{-i}}^{-1}{d^{(l)}_i}^{\top}\right)\\
+	&= ...
+\end{align*}
+
+In the case of KFAC FIM: $A^{(l)}_{-i}\otimes D^{(l)}_{-i}=A^{(l)}\otimes D^{(l)}-{\tilde{a}^{(l)}_i}^{\top}\tilde{a}^{(l)}_i\otimes D^{(l)}-A^{(l)}\otimes{\tilde{d}^{(l)}_i}^{\top}\tilde{d}^{(l)}_i+{\tilde{a}^{(l)}_i}^{\top}\tilde{a}^{(l)}_i\otimes{\tilde{d}^{(l)}_i}^{\top}\tilde{d}^{(l)}_i$.
+
+\paragraph{EKFAC FIM.}
+We note $\gamma^{(l)}_i=g^{(l)}_i\left(V^{(l)}_A\otimes V^{(l)}_D\right)$ the gradient in the Kronecker-factored eigenbasis and $\Lambda^{(l)}_j=\sum_k{\psi^{(l)}_{kj}}^2$. Keeping the eigenbasis fixed, $\Lambda^{(l)}_{-i,j}=\Lambda^{(l)}_j-{\psi^{(l)}_{ij}}^2$, so:
+
+\begin{align*}
+	\text{SI}&=\sum_l^L\sum_j\frac{{\gamma^{(l)}_{ij}}^2}{\Lambda^{(l)}_j+\lambda}\\
+	\text{LOO SI}&=\sum_l^L\sum_j\frac{{\gamma^{(l)}_{ij}}^2}{\Lambda^{(l)}_j-{\psi^{(l)}_{ij}}^2+\lambda}
+	=\sum_l^L\sum_j\frac{{\gamma^{(l)}_{ij}}^2}{\Lambda^{(l)}_j+\lambda}\frac{1}{1-\frac{{\psi^{(l)}_{ij}}^2}{\Lambda^{(l)}_j+\lambda}}
+\end{align*}
+
+For GLM: $\gamma^{(l)}_i=-r_i\psi^{(l)}_i$, $\text{SI}=r_i^2h^{\mathrm{EKFAC}}_{ii}$ and $\text{LOO SI}=r_i^2\sum_l^L\sum_j\frac{{\psi^{(l)}_{ij}}^2/(\Lambda^{(l)}_j+\lambda)}{1-{\psi^{(l)}_{ij}}^2/(\Lambda^{(l)}_j+\lambda)}\neq\frac{r_i^2h^{\mathrm{EKFAC}}_{ii}}{1-h^{\mathrm{EKFAC}}_{ii}}$
+
+In the case of EKFAC FIM: $F^{(l)}_{-i}=F^{(l)}-\left(V^{(l)}_A\otimes V^{(l)}_D\right)\diag\left({\psi^{(l)}_i}^2\right)\left(V^{(l)}_A\otimes V^{(l)}_D\right)^\top$.
+
+\end{document}
