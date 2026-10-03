@@ -314,3 +314,59 @@ def ViTB16(outputs=10, image_size=224):
         num_heads=12,
         num_layers=12,
     )
+
+
+class TimeSeriesTransformerEmbedding(nn.Module):
+    def __init__(self, ts_size=32, patch_size=4, hidden_size=128):
+        super().__init__()
+        self.patch_embeddings = nn.Conv1d(1, hidden_size, patch_size, stride=patch_size)
+        self.cls_token = nn.Parameter(torch.randn(1, 1, hidden_size))
+        num_patches = ts_size // patch_size
+        self.position_embeddings = nn.Parameter(
+            torch.zeros(1, num_patches + 1, hidden_size)
+        )
+
+    def forward(self, x):
+        x = self.patch_embeddings(x).transpose(1, 2)
+        cls_tokens = self.cls_token.expand(x.shape[0], -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x = x + self.position_embeddings
+        return x
+
+
+class TimeSeriesTransformer(nn.Module):
+    def __init__(
+        self,
+        outputs=10,
+        ts_size=28,
+        patch_size=4,
+        hidden_size=128,
+        num_heads=4,
+        num_layers=4,
+    ):
+        super().__init__()
+        self.embedding = TimeSeriesTransformerEmbedding(
+            ts_size=ts_size,
+            patch_size=patch_size,
+            hidden_size=hidden_size,
+        )
+        self.encoder = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model=hidden_size,
+                nhead=num_heads,
+                dim_feedforward=hidden_size * 4,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+                dropout=0,
+            ),
+            num_layers=num_layers,
+        )
+        self.head = nn.Sequential(
+            nn.LayerNorm(hidden_size), nn.Linear(hidden_size, outputs)
+        )
+
+    def forward(self, x):
+        x = self.encoder(self.embedding(x))
+        logits = self.head(x[:, 0])
+        return logits

@@ -77,7 +77,6 @@ args = parser.parse_args()
 
 args.dataset = "mnist-1d"
 args.runs = 1
-args.regul_type = "trace"
 args.seed = 1337
 args.rank = 10
 args.strategy = "kfac"
@@ -152,11 +151,12 @@ epochs = (
     + list(range(100, 1000, 100))
     + list(range(1000, args.epochs + 1, 2000))
 )
+# epochs = [0, 1000]
 # %%
 for i, (c, d) in enumerate(
     chain(product([256], [2, 4, 8, 16]), product([32, 64, 128, 256, 512, 1024], [4]))
 ):
-    model_fn = partial(model_fn, c=c, d=d, h=4)
+    # model_fn = partial(model_fn, c=c, d=d, h=1)
 
     model_clean = deepcopy(model_fn()).to(device=args.device)
     optimizer_clean = optimizer_fn(model_clean.parameters())
@@ -211,17 +211,25 @@ for i, (c, d) in enumerate(
         if "F" in args.repr:
             if "ekfac" in args.repr:
                 repr = partial(PMatEKFAC, strategy=args.strategy)
-                lc = supported_kfac_layers(LayerCollection.from_model(model))
+                lc = supported_kfac_layers(
+                    LayerCollection.from_model(model, ignore_unsupported_layers=True)
+                )
             elif "kfac" in args.repr:
                 repr = partial(PMatKFAC, strategy=args.strategy)
-                lc = supported_kfac_layers(LayerCollection.from_model(model))
+                lc = supported_kfac_layers(
+                    LayerCollection.from_model(model, ignore_unsupported_layers=True)
+                )
             elif "bd" in args.repr:
                 repr = PMatBlockDiag
-                lc = supported_kfac_layers(LayerCollection.from_model(model))
+                lc = supported_kfac_layers(
+                    LayerCollection.from_model(model, ignore_unsupported_layers=True)
+                )
                 # lc = LayerCollection.from_model(model)
             elif "lr" in args.repr:
                 repr = PMatLowRank
-                lc = supported_kfac_layers(LayerCollection.from_model(model))
+                lc = supported_kfac_layers(
+                    LayerCollection.from_model(model, ignore_unsupported_layers=True)
+                )
                 # lc = LayerCollection.from_model(model)
 
             F = FIM(
@@ -305,7 +313,6 @@ for i, (c, d) in enumerate(
         # %%
         avg_lam = (F.trace() / F.layer_collection.numel()).item()
         light_noisy_noaug = DataLoader(noisy_train_set, batch_size=32, shuffle=False)
-
         self_influences = []
         self_influences_loo = []
         leverages = []
@@ -661,14 +668,27 @@ for i, (c, d) in enumerate(
                 else:
                     regul = args.regul
 
-                cache[layer_id] = torch.linalg.cholesky(
+                # cache[layer_id] = torch.linalg.cholesky(
+                #     block
+                #     + regul
+                #     * torch.eye(block.shape[0], dtype=block.dtype, device=block.device)
+                # )
+
+                cache[layer_id] = torch.linalg.ldl_factor(
                     block
                     + regul
                     * torch.eye(block.shape[0], dtype=block.dtype, device=block.device)
                 )
 
-                def solve(A, B):
-                    return torch.cholesky_solve(B, A)
+                # def solve(A, b):
+                #     return torch.linalg.solve_triangular(
+                #         A.mT,
+                #         torch.linalg.solve_triangular(A, b, upper=False),
+                #         upper=True,
+                #     )
+
+                def solve(A, b):
+                    return torch.linalg.ldl_solve(*A, b)
 
             for inputs, targets in tqdm(light_noisy_noaug):
                 self_influence = []

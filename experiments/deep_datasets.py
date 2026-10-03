@@ -2,10 +2,12 @@ from functools import partial
 from typing import Callable, Dict, NamedTuple, Optional
 
 import torch
-from deep_models import ResNet18, ResNet34
+from deep_models import ResNet18, ResNet34, TimeSeriesTransformer
 from torch import nn, optim
 from torch.utils.data import Dataset, TensorDataset
 from torchvision import datasets, transforms
+
+from experiments.nng_utils import replace_torch_mha_with_nng_mha
 
 
 def mnist1d(root, train=True, transform=None):
@@ -100,7 +102,11 @@ DATASETS = {
         #     nn.Flatten(),
         #     nn.Linear(c * 4, outputs),
         # ),
-        # partial(optim.AdamW, weight_decay=1e-2),
+        lambda outputs=10: nn.Sequential(
+            nn.Unflatten(-1, (1, -1)),
+            replace_torch_mha_with_nng_mha(TimeSeriesTransformer(outputs=outputs)),
+        ),
+        partial(optim.AdamW, weight_decay=1e-2),
         # partial(
         #     torch.optim.SGD,
         #     lr=1e-2,
@@ -108,44 +114,44 @@ DATASETS = {
         #     weight_decay=1e-2,
         #     nesterov=True,
         # ),
-        lambda outputs=10, c=64, h=4, d=2, k=9: nn.Sequential(
-            nn.Unflatten(-1, (1, -1)),
-            nn.Conv1d(1, c, kernel_size=9, padding=9 // 2),
-            nn.GELU(),
-            nn.AdaptiveAvgPool1d(1),
-            nn.Flatten(),
-            nn.Linear(c, c),
-            # nn.Unflatten(-1, (1, -1)),
-            # nn.Conv1d(1, c, kernel_size=k, padding=k // 2),
-            # nn.GELU(),
-            # nn.MaxPool1d(2),  # 28 -> 14, first bit of real invariance
-            # nn.Conv1d(c, c * 2, kernel_size=k, padding=k // 2),
-            # nn.GELU(),
-            # nn.AdaptiveAvgPool1d(1),  # global pool -> true shift invariance
-            # nn.Flatten(),
-            # nn.Linear(c * 2, c),
-            # nn.Linear(28, c),
-            *[
-                Residuals(
-                    nn.Sequential(
-                        nn.LayerNorm(c),
-                        nn.Linear(c, c * h),
-                        nn.GELU(),
-                        nn.Linear(c * h, c),
-                    )
-                )
-                for _ in range(d)
-            ],
-            nn.LayerNorm(c),
-            nn.Linear(c, outputs),
-        ),
-        partial(
-            torch.optim.SGD,
-            lr=1e-2,
-            momentum=0.9,
-            weight_decay=0.0,
-            nesterov=True,
-        ),
+        # lambda outputs=10, c=64, h=4, d=2, k=9: nn.Sequential(
+        #     nn.Unflatten(-1, (1, -1)),
+        #     nn.Conv1d(1, c, kernel_size=9, padding=9 // 2),
+        #     nn.GELU(),
+        #     nn.AdaptiveAvgPool1d(1),
+        #     nn.Flatten(),
+        #     nn.Linear(c, c),
+        #     # nn.Unflatten(-1, (1, -1)),
+        #     # nn.Conv1d(1, c, kernel_size=k, padding=k // 2),
+        #     # nn.GELU(),
+        #     # nn.MaxPool1d(2),  # 28 -> 14, first bit of real invariance
+        #     # nn.Conv1d(c, c * 2, kernel_size=k, padding=k // 2),
+        #     # nn.GELU(),
+        #     # nn.AdaptiveAvgPool1d(1),  # global pool -> true shift invariance
+        #     # nn.Flatten(),
+        #     # nn.Linear(c * 2, c),
+        #     # nn.Linear(28, c),
+        #     *[
+        #         Residuals(
+        #             nn.Sequential(
+        #                 nn.LayerNorm(c),
+        #                 nn.Linear(c, c * h),
+        #                 nn.GELU(),
+        #                 nn.Linear(c * h, c),
+        #             )
+        #         )
+        #         for _ in range(d)
+        #     ],
+        #     nn.LayerNorm(c),
+        #     nn.Linear(c, outputs),
+        # ),
+        # partial(
+        #     torch.optim.SGD,
+        #     lr=1e-2,
+        #     momentum=0.9,
+        #     weight_decay=0.0,
+        #     nesterov=True,
+        # ),
         list(map(str, range(10))),
     ),
     "mnist": Experiment(
