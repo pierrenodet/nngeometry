@@ -21,6 +21,8 @@ from copy import deepcopy
 from functools import partial
 from itertools import chain, product
 
+from nngeometry.solve import qr
+
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import h5py
@@ -39,14 +41,14 @@ from deep_utils import (
     tensorize,
 )
 from matplotlib import pyplot as plt
-from scipy.stats import kendalltau
+from scipy.stats import kendalltau, pearsonr
 from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader, Subset
 from torchvision import transforms
 from tqdm import tqdm
 
 from experiments.nng_utils import last_layer, supported_kfac_layers
-from nngeometry.backend import TorchHooksJacobianBackend
+from nngeometry.backend import TorchFuncJacobianBackend, TorchHooksJacobianBackend
 from nngeometry.jacobian import Jacobian
 from nngeometry.layercollection import LayerCollection
 from nngeometry.metrics import FIM, FIM_MonteCarlo, sqrt_var_classif_logits
@@ -56,6 +58,7 @@ from nngeometry.object.pspace import (
     PMatBlockDiag,
     PMatDense,
     PMatEKFAC,
+    PMatImplicit,
     PMatKFAC,
     PMatLowRank,
 )
@@ -72,16 +75,15 @@ if is_interactive():
 parser = argparse.ArgumentParser()
 add_default_arguments(parser, "mislabeled")
 parser.add_argument("--noise_ratio", type=float, default=0.25)
+parser.add_argument("--rank", type=int, default=None)
 
 args = parser.parse_args()
 
 args.dataset = "mnist-1d"
 args.runs = 1
 args.seed = 1337
-args.rank = 10
 args.strategy = "kfac"
 args.whiten = "eigh"
-
 
 os.makedirs(args.output_dir, exist_ok=True)
 
@@ -121,14 +123,14 @@ else:
     augmentations = []
 
 
-if args.dataset == "cifar-10":
-    fname = "CIFAR-10_human.pt"
-    if not os.path.exists(os.path.join(args.data_dir, fname)):
-        r = requests.get(
-            f"https://github.com/UCSC-REAL/cifar-10-100n/raw/refs/heads/main/data/{fname}"
-        )
-        open(os.path.join(args.data_dir, fname), "wb").write(r.content)
-    noises = torch.load(os.path.join(args.data_dir, fname), weights_only=False)
+# if args.dataset == "cifar-10":
+#     fname = "CIFAR-10_human.pt"
+#     if not os.path.exists(os.path.join(args.data_dir, fname)):
+#         r = requests.get(
+#             f"https://github.com/UCSC-REAL/cifar-10-100n/raw/refs/heads/main/data/{fname}"
+#         )
+#         open(os.path.join(args.data_dir, fname), "wb").write(r.content)
+#     noises = torch.load(os.path.join(args.data_dir, fname), weights_only=False)
 
 train = DataLoader(train_set, batch_size=128, shuffle=True)
 
@@ -156,7 +158,7 @@ epochs = (
 for i, (c, d) in enumerate(
     chain(product([256], [2, 4, 8, 16]), product([32, 64, 128, 256, 512, 1024], [4]))
 ):
-    # model_fn = partial(model_fn, c=c, d=d, h=1)
+    model_fn = partial(model_fn, c=c, d=d, h=4)
 
     model_clean = deepcopy(model_fn()).to(device=args.device)
     optimizer_clean = optimizer_fn(model_clean.parameters())
@@ -211,35 +213,30 @@ for i, (c, d) in enumerate(
         if "F" in args.repr:
             if "ekfac" in args.repr:
                 repr = partial(PMatEKFAC, strategy=args.strategy)
-                lc = supported_kfac_layers(
-                    LayerCollection.from_model(model, ignore_unsupported_layers=True)
-                )
+                backend = TorchHooksJacobianBackend(model, func, verbose=True)
             elif "kfac" in args.repr:
                 repr = partial(PMatKFAC, strategy=args.strategy)
-                lc = supported_kfac_layers(
-                    LayerCollection.from_model(model, ignore_unsupported_layers=True)
-                )
+                backend = TorchHooksJacobianBackend(model, func, verbose=True)
             elif "bd" in args.repr:
                 repr = PMatBlockDiag
-                lc = supported_kfac_layers(
-                    LayerCollection.from_model(model, ignore_unsupported_layers=True)
-                )
-                # lc = LayerCollection.from_model(model)
+                backend = TorchHooksJacobianBackend(model, func, verbose=True)
             elif "lr" in args.repr:
-                repr = PMatLowRank
-                lc = supported_kfac_layers(
-                    LayerCollection.from_model(model, ignore_unsupported_layers=True)
+                repr = PMatImplicit
+                backend = TorchFuncJacobianBackend(
+                    model,
+                    lambda outputs, targets: sqrt_var_classif_logits(outputs),
+                    verbose=True,
                 )
-                # lc = LayerCollection.from_model(model)
+                repr = PMatLowRank
+                backend = TorchHooksJacobianBackend(model, func, verbose=True)
+            lc = supported_kfac_layers(
+                LayerCollection.from_model(model, ignore_unsupported_layers=True)
+            )
 
-            F = FIM(
-                model,
-                DataLoader(noisy_train_set, batch_size=128, shuffle=False),
-                repr,
-                "classif_logits",
-                device=args.device,
+            F = repr(
+                generator=backend,
+                examples=DataLoader(noisy_train_set, batch_size=128, shuffle=False),
                 layer_collection=lc,
-                verbose=True,
             )
         elif "K" in args.repr:
             generator = TorchHooksJacobianBackend(
@@ -255,6 +252,8 @@ for i, (c, d) in enumerate(
                 examples=DataLoader(noisy_train_set, batch_size=128, shuffle=False),
             )
 
+        print(lc.numel())
+
         if hasattr(F, "update_diag"):
             F.update_diag(noisy_train)
 
@@ -268,51 +267,60 @@ for i, (c, d) in enumerate(
                 A *= (1 / (len(classes) - 1)) ** 0.5
                 G *= (1 * (len(classes) - 1)) ** 0.5
 
-        # def rnystroem(A, k, regul=1e-8):
-        #     lc = A.layer_collection
+        def rnystroem(A, k, regul=1e-8):
+            lc = A.layer_collection
 
-        #     # isn't there a better way ?
-        #     layerid_to_mod = lc.get_layerid_module_map(A.generator.model)
-        #     device = A.generator._check_same_device(layerid_to_mod.values())
-        #     dtype = A.generator._check_same_dtype(layerid_to_mod.values())
+            # isn't there a better way ?
+            layerid_to_mod = lc.get_layerid_module_map(A.generator.model)
+            device = A.generator._check_same_device(layerid_to_mod.values())
+            dtype = A.generator._check_same_dtype(layerid_to_mod.values())
 
-        #     S = random_pfmap(lc, (k, 1), device, dtype)
-        #     S, _ = qr(S)
-        #     Y = A @ S
-        #     Y = Y
-        #     C = S @ Y.adjoint()
-        #     B = C.solve(Y, regul=regul)
-        #     evecs, evals, _ = torch.linalg.svd(
-        #         B.to_torch().view(-1, B.size(-1)).t(), full_matrices=False
-        #     )
-        #     evals = torch.clamp(evals**2 - regul, min=0)
-        #     return evals, evecs
-
-        if args.rank is not None and isinstance(F, PMatLowRank):
-            _, evals, evecs = torch.svd_lowrank(
-                F.data.view(-1, F.size(1)), q=20 + args.rank, niter=20
+            S = random_pfmap(lc, (k, 1), device, dtype)
+            S, _ = qr(S)
+            Y = A @ S.adjoint()
+            C = (S @ Y)._cholesky(regul=regul)
+            B = torch.linalg.solve_triangular(
+                C, Y.adjoint().to_torch().view(-1, lc.numel()), upper=False
             )
+            evecs, evals, _ = torch.linalg.svd(B.t(), full_matrices=False)
+            evals, evecs = evals.flip(0), evecs.flip(1)
+            evals = torch.clamp(evals**2 - regul, min=0)
+            return evals, evecs
+
+        if isinstance(F, (PMatImplicit, PMatLowRank)) and args.rank is not None:
+            # _, evals, evecs = torch.svd_lowrank(
+            #     F.data.view(-1, F.size(1)), q=20 + args.rank, niter=20
+            # )
             # evals = evals**2
-            # evals, evecs = rnystroem(F, k=args.rank)
-            # evals = evals**2
-            # F.compute_eigendecomposition(impl="gram_eigh")
+            evals, evecs = rnystroem(F, k=args.rank + 20, regul=0)
+            # F.compute_eigendecomposition(impl="eigh", k=20 + args.rank)
             # evals, evecs = F.get_eigendecomposition()
+            # J = F.data.view(-1, F.size(1))
+            # evals = torch.ones(J.size(0), device=args.device)
+            # evecs = (
+            #     torch.randn((args.rank, J.size(0)), device=args.device) @ J
+            # ).t() / args.rank
 
         # %%
 
-        if args.rank is not None and isinstance(F, PMatLowRank):
-            lr_evals, lr_evecs = evals[-args.rank :], evecs[:, -args.rank :]
-            F_old = F
-            F = PMatLowRank(
-                F.layer_collection,
-                F.generator,
-                data=(lr_evecs * (lr_evals[None, :] ** 0.5)).t(),
-            )
-            F.evals = lr_evals
-            F.evecs = lr_evecs
+        if isinstance(F, (PMatImplicit, PMatLowRank)):
+            if args.rank is not None:
+                lr_evals, lr_evecs = evals[-args.rank :], evecs[:, -args.rank :]
+                F_old = F
+                F = PMatLowRank(
+                    F.layer_collection,
+                    F.generator,
+                    data=(lr_evecs * (lr_evals[None, :] ** 0.5)).t(),
+                )
+                F.evals = lr_evals
+                F.evecs = lr_evecs
+            else:
+                F.compute_eigendecomposition("svd")
+
         # %%
         avg_lam = (F.trace() / F.layer_collection.numel()).item()
         light_noisy_noaug = DataLoader(noisy_train_set, batch_size=32, shuffle=False)
+
         self_influences = []
         self_influences_loo = []
         leverages = []
@@ -353,14 +361,19 @@ for i, (c, d) in enumerate(
                         pfmap_func,
                         regul=regul,
                         solve="eigendecomposition",
-                        rcond=0,
+                        # rcond=0,
                     ).to_torch(),
                 )
                 cross = torch.einsum(
                     "onp, Onp->noO",
-                    pfmap_func.to_torch(),
-                    FinvG,
-                )
+                    pfmap_grad.to_torch(),
+                    F.solve(
+                        pfmap_func,
+                        regul=regul,
+                        solve="eigendecomposition",
+                        # rcond=0,
+                    ).to_torch(),
+                ).transpose(-1, -2)
                 self_influences.append(self_influence)
                 schur = torch.eye(downdate.shape[-1], device=args.device) - downdate
                 loo_effect = torch.linalg.solve(schur, cross)
@@ -658,6 +671,28 @@ for i, (c, d) in enumerate(
                 cooks.append(torch.stack(cook, dim=0).detach().cpu())
 
         elif isinstance(F, PMatBlockDiag):
+            if args.solver == "cholesky":
+
+                def factor(block):
+                    return torch.linalg.cholesky(block)
+
+                def solve(A, b):
+                    if "cuda" in args.device:
+                        return torch.cholesky_solve(b, A)
+                    else:
+                        return torch.linalg.solve_triangular(
+                            A.mT,
+                            torch.linalg.solve_triangular(A, b, upper=False),
+                            upper=True,
+                        )
+            else:
+
+                def factor(block):
+                    return torch.linalg.ldl_factor(block)
+
+                def solve(A, b):
+                    return torch.linalg.ldl_solve(*A, b)
+
             cache = {}
 
             for layer_id, layer in tqdm(lc.layers.items()):
@@ -668,27 +703,11 @@ for i, (c, d) in enumerate(
                 else:
                     regul = args.regul
 
-                # cache[layer_id] = torch.linalg.cholesky(
-                #     block
-                #     + regul
-                #     * torch.eye(block.shape[0], dtype=block.dtype, device=block.device)
-                # )
-
-                cache[layer_id] = torch.linalg.ldl_factor(
-                    block
-                    + regul
-                    * torch.eye(block.shape[0], dtype=block.dtype, device=block.device)
+                block_reg = block + regul * torch.eye(
+                    block.shape[0], dtype=block.dtype, device=block.device
                 )
 
-                # def solve(A, b):
-                #     return torch.linalg.solve_triangular(
-                #         A.mT,
-                #         torch.linalg.solve_triangular(A, b, upper=False),
-                #         upper=True,
-                #     )
-
-                def solve(A, b):
-                    return torch.linalg.ldl_solve(*A, b)
+                cache[layer_id] = factor(block_reg)
 
             for inputs, targets in tqdm(light_noisy_noaug):
                 self_influence = []
@@ -837,22 +856,21 @@ for i, (c, d) in enumerate(
             cooks = torch.cat(cooks, dim=1)
 
         # %%
-        margins = []
-        confidences = []
+        residuals = []
+        pearson_residuals = []
         for inputs, targets in tqdm(light_noisy_noaug):
             with torch.no_grad():
                 outputs = model(inputs)
                 p = torch.softmax(outputs, dim=1)
-                mask = torch.zeros_like(p, dtype=bool)
-                mask[torch.arange(len(targets)), targets] = True
-                margins.append(
-                    p[mask] - p[~mask].reshape(len(targets), -1).max(axis=1)[0]
-                )
-                confidences.append(p[mask])
-        margins = -torch.cat(margins)
-        confidences = -torch.cat(confidences)
+                Y = torch.nn.functional.one_hot(targets, num_classes=p.shape[1])
+                residuals.append(torch.linalg.vector_norm((Y - p), dim=1))
+                logp = torch.nn.functional.log_softmax(outputs, dim=1)
+                mask = Y.bool()
+                pearson_residuals.append(torch.sqrt(torch.expm1(-logp[mask])))
+        residuals = torch.cat(residuals)
+        pearson_residuals = torch.cat(pearson_residuals)
 
-        for scores in [margins, confidences]:
+        for scores in [residuals, pearson_residuals]:
             print(roc_auc_score(noisy_examples, scores.numpy(force=True)))
 
         for scores in [
@@ -870,6 +888,23 @@ for i, (c, d) in enumerate(
                     .sum(dim=0)
                     .numpy(force=True),
                 )
+            )
+
+        for scores, scores_loo in [
+            (self_influences, self_influences_loo),
+            (leverages, leverages_loo),
+        ]:
+            print(
+                pearsonr(
+                    torch.diagonal(scores, dim1=-2, dim2=-1)
+                    .sum(dim=-1)
+                    .sum(dim=0)
+                    .numpy(force=True),
+                    torch.diagonal(scores_loo, dim1=-2, dim2=-1)
+                    .sum(dim=-1)
+                    .sum(dim=0)
+                    .numpy(force=True),
+                ).statistic
             )
 
         with h5py.File(
@@ -915,7 +950,7 @@ for i, (c, d) in enumerate(
             metrics.create_dataset("cook", data=cooks.detach().cpu())
             metrics.create_dataset("leverage", data=leverages.detach().cpu())
             metrics.create_dataset("leverage_loo", data=leverages_loo.detach().cpu())
-            metrics.create_dataset("margins", data=margins.detach().cpu())
-            metrics.create_dataset("confidences", data=confidences.detach().cpu())
+            metrics.create_dataset("residuals", data=residuals.detach().cpu())
+            metrics.create_dataset("pearson_residuals", data=pearson_residuals.detach().cpu())
             if "noisy_examples" not in run:
                 run.create_dataset("noisy_examples", data=noisy_examples.detach().cpu())
