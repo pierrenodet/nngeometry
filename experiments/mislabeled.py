@@ -21,8 +21,6 @@ from copy import deepcopy
 from functools import partial
 from itertools import chain, product
 
-from nngeometry.solve import qr
-
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import h5py
@@ -53,7 +51,7 @@ from nngeometry.jacobian import Jacobian
 from nngeometry.layercollection import LayerCollection
 from nngeometry.metrics import FIM, FIM_MonteCarlo, sqrt_var_classif_logits
 from nngeometry.object.fspace import FMatDense
-from nngeometry.object.map import PFMapFactored, random_pfmap
+from nngeometry.object.map import PFMapAdjoint, PFMapDense, PFMapFactored, random_pfmap
 from nngeometry.object.pspace import (
     PMatBlockDiag,
     PMatDense,
@@ -62,7 +60,8 @@ from nngeometry.object.pspace import (
     PMatKFAC,
     PMatLowRank,
 )
-from nngeometry.object.vector import FVector
+from nngeometry.object.vector import FVector, PVector
+from nngeometry.solve import qr
 
 
 def is_interactive():
@@ -83,7 +82,7 @@ args.dataset = "mnist-1d"
 args.runs = 1
 args.seed = 1337
 args.strategy = "kfac"
-args.whiten = "eigh"
+args.solver = "eigh"
 
 os.makedirs(args.output_dir, exist_ok=True)
 
@@ -156,8 +155,9 @@ epochs = (
 # epochs = [0, 1000]
 # %%
 for i, (c, d) in enumerate(
-    chain(product([256], [2, 4, 8, 16]), product([32, 64, 128, 256, 512, 1024], [4]))
+    chain(product([64], [2, 4, 8, 16]), product([32, 64, 128, 256, 512, 1024], [4]))
 ):
+    # for i, (c, d) in enumerate([(128, 4)]):
     model_fn = partial(model_fn, c=c, d=d, h=4)
 
     model_clean = deepcopy(model_fn()).to(device=args.device)
@@ -195,7 +195,6 @@ for i, (c, d) in enumerate(
         print(none_train_accuracy, none_train_loss)
         print(none_test_accuracy, none_test_loss)
 
-        # %%
         def func(inputs, targets):
             return sqrt_var_classif_logits(model(inputs))
 
@@ -229,6 +228,16 @@ for i, (c, d) in enumerate(
                 )
                 repr = PMatLowRank
                 backend = TorchHooksJacobianBackend(model, func, verbose=True)
+            elif "i" in args.repr:
+                repr = PMatImplicit
+                backend = TorchFuncJacobianBackend(
+                    model,
+                    lambda outputs, targets: sqrt_var_classif_logits(outputs),
+                    verbose=True,
+                )
+                preco_repr = partial(PMatEKFAC, strategy="one_iter_kpsvd")
+                preco_backend = TorchHooksJacobianBackend(model, func, verbose=True)
+
             lc = supported_kfac_layers(
                 LayerCollection.from_model(model, ignore_unsupported_layers=True)
             )
@@ -287,25 +296,33 @@ for i, (c, d) in enumerate(
             evals = torch.clamp(evals**2 - regul, min=0)
             return evals, evecs
 
-        if isinstance(F, (PMatImplicit, PMatLowRank)) and args.rank is not None:
+        if "lr" in args.repr and args.rank is not None:
             # _, evals, evecs = torch.svd_lowrank(
             #     F.data.view(-1, F.size(1)), q=20 + args.rank, niter=20
             # )
             # evals = evals**2
-            evals, evecs = rnystroem(F, k=args.rank + 20, regul=0)
-            # F.compute_eigendecomposition(impl="eigh", k=20 + args.rank)
-            # evals, evecs = F.get_eigendecomposition()
-            # J = F.data.view(-1, F.size(1))
-            # evals = torch.ones(J.size(0), device=args.device)
-            # evecs = (
-            #     torch.randn((args.rank, J.size(0)), device=args.device) @ J
-            # ).t() / args.rank
-
+            # evals, evecs = rnystroem(F, k=args.rank + 20, regul=0)
+            if isinstance(F, PMatImplicit):
+                F.compute_eigendecomposition(impl="eigh", k=20 + args.rank)
+                evals, evecs = F.get_eigendecomposition()
+                evals = N * evals
+            else:
+                F.compute_eigendecomposition(impl="svd")
+                evals, evecs = F.get_eigendecomposition()
+                # J = F.data.view(-1, lc.numel())
+                # S = torch.randn(J.size(0), args.rank, device=args.device) / args.rank ** 0.5
+                # F_sketched = PMatLowRank(F.layer_collection, F.generator, data=S.T @ J)
+                # F_sketched.compute_eigendecomposition(impl="svd")
+                # evals, evecs = F_sketched.get_eigendecomposition()
         # %%
 
-        if isinstance(F, (PMatImplicit, PMatLowRank)):
+        if "lr" in args.repr:
             if args.rank is not None:
-                lr_evals, lr_evecs = evals[-args.rank :], evecs[:, -args.rank :]
+                P = F.data.view(-1, F.data.size(-1)) @ evecs
+                evals, P_evecs = torch.linalg.eigh(P.t() @ P)
+                evals, evecs = evals.clamp(min=0), evecs @ P_evecs
+                # lr_evals, lr_evecs = evals[-args.rank :], evecs[:, -args.rank :]
+                lr_evals, lr_evecs = evals, evecs
                 F_old = F
                 F = PMatLowRank(
                     F.layer_collection,
@@ -318,7 +335,10 @@ for i, (c, d) in enumerate(
                 F.compute_eigendecomposition("svd")
 
         # %%
-        avg_lam = (F.trace() / F.layer_collection.numel()).item()
+        if "i" in args.repr:
+            avg_lam = 1
+        else:
+            avg_lam = (F.trace() / F.layer_collection.numel()).item()
         light_noisy_noaug = DataLoader(noisy_train_set, batch_size=32, shuffle=False)
 
         self_influences = []
@@ -347,7 +367,10 @@ for i, (c, d) in enumerate(
                     layer_collection=lc,
                 )
                 FinvG = F.solve(
-                    pfmap_grad, regul=regul, solve="eigendecomposition"
+                    pfmap_grad, regul=regul, solve="eigendecomposition", rcond=0
+                ).to_torch()
+                FinvJ = F.solve(
+                    pfmap_func, regul=regul, solve="eigendecomposition", rcond=0
                 ).to_torch()
                 self_influence = torch.einsum(
                     "onp, Onp->noO",
@@ -357,31 +380,19 @@ for i, (c, d) in enumerate(
                 downdate = torch.einsum(
                     "onp, Onp->noO",
                     pfmap_func.to_torch(),
-                    F.solve(
-                        pfmap_func,
-                        regul=regul,
-                        solve="eigendecomposition",
-                        # rcond=0,
-                    ).to_torch(),
+                    FinvJ,
                 )
                 cross = torch.einsum(
                     "onp, Onp->noO",
-                    pfmap_grad.to_torch(),
-                    F.solve(
-                        pfmap_func,
-                        regul=regul,
-                        solve="eigendecomposition",
-                        # rcond=0,
-                    ).to_torch(),
-                ).transpose(-1, -2)
+                    pfmap_func.to_torch(),
+                    FinvG,
+                )
                 self_influences.append(self_influence)
                 schur = torch.eye(downdate.shape[-1], device=args.device) - downdate
                 loo_effect = torch.linalg.solve(schur, cross)
                 self_influence_loo = cross.transpose(1, 2) @ loo_effect
                 self_influences_loo.append(self_influence + self_influence_loo)
-                FinvJ = F.solve(
-                    pfmap_func, regul=regul, solve="eigendecomposition"
-                ).to_torch()
+
                 leverage = torch.einsum(
                     "onp, Onp->noO",
                     pfmap_func.to_torch(),
@@ -501,7 +512,7 @@ for i, (c, d) in enumerate(
                 cooks.append(torch.stack(cook, dim=0).detach().cpu())
 
         elif isinstance(F, PMatKFAC) and args.strategy == "kfac":
-            if args.whiten == "eigh":
+            if args.solver == "eigh":
 
                 def whitener(A, damp):
                     evals, evecs = torch.linalg.eigh(A)
@@ -511,7 +522,7 @@ for i, (c, d) in enumerate(
                 def whiten(L, x):
                     return x @ L
 
-            elif args.whiten == "cholesky":
+            elif args.solver == "cholesky":
 
                 def whitener(A, damp):
                     return torch.linalg.cholesky(
@@ -840,6 +851,99 @@ for i, (c, d) in enumerate(
                     + cross @ loo_effect
                     + loo_effect.transpose(1, 2) @ loo_effect
                 )
+        elif isinstance(F, PMatImplicit):
+            F.generator.verbose = False
+
+            class LOO_F(PMatImplicit):
+                def __init__(self, F, J, N):
+                    self.F = F
+                    self.J = J
+                    self.N = N
+
+                @property
+                def layer_collection(self):
+                    return self.F.layer_collection
+
+                def __matmul__(self, v):
+                    if isinstance(v, PFMapAdjoint):
+                        downdate = PFMapDense(
+                            self.J.layer_collection,
+                            self.J.generator,
+                            data=(
+                                torch.einsum(
+                                    "onp,onq,Onq->Onp",
+                                    self.J.to_torch(),
+                                    self.J.to_torch(),
+                                    v.adjoint().to_torch(),
+                                )
+                                / self.N
+                            ),
+                        )
+                        return ((self.F @ v).adjoint() - downdate).adjoint()
+                    else:
+                        return self.F @ v - 1 / self.N * self.J.adjoint() @ (self.J @ v)
+
+            preco = preco_repr(
+                lc,
+                preco_backend,
+                examples=DataLoader(noisy_train_set, batch_size=128, shuffle=False),
+            )
+            preco.update_diag(
+                DataLoader(noisy_train_set, batch_size=128, shuffle=False)
+            )
+            for inputs, targets in tqdm(light_noisy_noaug):
+                pfmap_func = Jacobian(
+                    model,
+                    (inputs, targets),
+                    function=func,
+                    layer_collection=lc,
+                )
+                pfmap_grad = Jacobian(
+                    model,
+                    (inputs, targets),
+                    function=loss,
+                    layer_collection=lc,
+                )
+
+                # init = preco.solve(pfmap_grad, regul=args.regul)
+                FinvG = F.solve(
+                    pfmap_grad,
+                    regul=args.regul,
+                    rtol=1e-3,
+                    max_iter=1000,
+                    # x0=init,
+                    # M=preco,
+                )
+                FinvG_downdated = LOO_F(F, pfmap_func, N).solve(
+                    pfmap_grad,
+                    regul=args.regul,
+                    rtol=1e-3,
+                    max_iter=1000,
+                    # x0=update,
+                    # M=preco,
+                )
+
+                self_influences.append(
+                    torch.einsum(
+                        "onp, Onp->noO", pfmap_grad.to_torch(), FinvG.to_torch()
+                    )
+                )
+                self_influences_loo.append(
+                    torch.einsum(
+                        "onp, Onp->noO",
+                        pfmap_grad.to_torch(),
+                        FinvG_downdated.to_torch(),
+                    )
+                )
+                leverages.append(self_influences[-1])
+                leverages_loo.append(self_influences_loo[-1])
+                cooks.append(
+                    torch.einsum(
+                        "onp, Onp->noO",
+                        FinvG_downdated.to_torch(),
+                        (F @ FinvG_downdated.adjoint()).adjoint().to_torch(),
+                    )
+                )
 
         # %%
         if self_influences[0].ndim == 3:
@@ -926,10 +1030,10 @@ for i, (c, d) in enumerate(
             epoch = run.require_group(f"epoch_{epochs[e]}")
             epoch.attrs.update(
                 {
-                    "gold_train_accuracy": gold_train_accuracy,
-                    "gold_test_accuracy": gold_test_accuracy,
-                    "gold_train_loss": gold_train_loss,
-                    "gold_test_loss": gold_test_loss,
+                    # "gold_train_accuracy": gold_train_accuracy,
+                    # "gold_test_accuracy": gold_test_accuracy,
+                    # "gold_train_loss": gold_train_loss,
+                    # "gold_test_loss": gold_test_loss,
                     "none_ntrain_accuracy": none_ntrain_accuracy,
                     "none_ntrain_loss": none_ntrain_loss,
                     "none_train_accuracy": none_train_accuracy,
@@ -951,6 +1055,8 @@ for i, (c, d) in enumerate(
             metrics.create_dataset("leverage", data=leverages.detach().cpu())
             metrics.create_dataset("leverage_loo", data=leverages_loo.detach().cpu())
             metrics.create_dataset("residuals", data=residuals.detach().cpu())
-            metrics.create_dataset("pearson_residuals", data=pearson_residuals.detach().cpu())
+            metrics.create_dataset(
+                "pearson_residuals", data=pearson_residuals.detach().cpu()
+            )
             if "noisy_examples" not in run:
                 run.create_dataset("noisy_examples", data=noisy_examples.detach().cpu())
