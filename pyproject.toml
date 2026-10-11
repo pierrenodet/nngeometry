@@ -29,6 +29,10 @@ dependencies = [
   "torch>=2.14.0",
   "torchvision",
   "tqdm",
+  "h5py",
+  "scikit-learn",
+  "opt-einsum",
+  "datasets",
 ]
 
 [project.urls]

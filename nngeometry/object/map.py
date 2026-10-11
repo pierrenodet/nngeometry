@@ -209,6 +209,9 @@ class PFMapFactored(PFMap, AdjointMixin):
                 torch_layers.append(value.flatten(start_dim=2))
         return torch.cat(torch_layers, dim=2)
 
+    def to_dense(self):
+        return PFMapDense(self.layer_collection, self.generator, data=self.to_torch())
+
     def size(self, dim=None):
         _, g = next(iter(self.data.values()))
         size = torch.Size((g.size(0), g.size(1), self.layer_collection.numel()))

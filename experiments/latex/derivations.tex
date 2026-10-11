@@ -90,11 +90,11 @@ We assume that $g^{(l)}_i=a^{(l)}_i\otimes d^{(l)}_i$ (no spatial locations) and
 	&=\sum_l^L \left(a^{(l)}_i {A^{(l)}}^{-1}{a^{(l)}_i}^{\top}\right)\left(d^{(l)}_i {D^{(l)}}^{-1}{d^{(l)}_i}^{\top}\right)\\
 \end{align*}
 
-With $A^{(l)}_{-i}=A^{(l)}-{\tilde{a}^{(l)}_i}^{\top}\tilde{a}^{(l)}_i$ and $D^{(l)}_{-i}=D^{(l)}-{\tilde{d}^{(l)}_i}^{\top}\tilde{d}^{(l)}_i$, Sherman-Morrison on each factor gives:
+With $A^{(l)}_{-i}=A^{(l)}-\left(\tilde{a}^{(l)}_i\right)^{\top}\tilde{a}^{(l)}_i$ and $D^{(l)}_{-i}=D^{(l)}-\left(\tilde{d}^{(l)}_i\right)^{\top}\tilde{d}^{(l)}_i$, Sherman-Morrison on each factor gives:
 
 \begin{align*}
-	a^{(l)}_i {A^{(l)}_{-i}}^{-1}{a^{(l)}_i}^{\top}&=a^{(l)}_i {A^{(l)}}^{-1}{a^{(l)}_i}^{\top}+\frac{\left(a^{(l)}_i {A^{(l)}}^{-1}{\tilde{a}^{(l)}_i}^{\top}\right)^2}{1-\tilde{a}^{(l)}_i {A^{(l)}}^{-1}{\tilde{a}^{(l)}_i}^{\top}}\\
-	d^{(l)}_i {D^{(l)}_{-i}}^{-1}{d^{(l)}_i}^{\top}&=d^{(l)}_i {D^{(l)}}^{-1}{d^{(l)}_i}^{\top}+\frac{\left(d^{(l)}_i {D^{(l)}}^{-1}{\tilde{d}^{(l)}_i}^{\top}\right)^2}{1-\tilde{d}^{(l)}_i {D^{(l)}}^{-1}{\tilde{d}^{(l)}_i}^{\top}}
+	a^{(l)}_i {A^{(l)}_{-i}}^{-1}{a^{(l)}_i}^{\top}&=a^{(l)}_i {A^{(l)}}^{-1}{a^{(l)}_i}^{\top}+\frac{\left(a^{(l)}_i {A^{(l)}}^{-1}\left(\tilde{a}^{(l)}_i\right)^{\top}\right)^2}{1-\tilde{a}^{(l)}_i {A^{(l)}}^{-1}\left(\tilde{a}^{(l)}_i\right)^{\top}}\\
+	d^{(l)}_i {D^{(l)}_{-i}}^{-1}{d^{(l)}_i}^{\top}&=d^{(l)}_i {D^{(l)}}^{-1}{d^{(l)}_i}^{\top}+\frac{\left(d^{(l)}_i {D^{(l)}}^{-1}\left(\tilde{d}^{(l)}_i\right)^{\top}\right)^2}{1-\tilde{d}^{(l)}_i {D^{(l)}}^{-1}\left(\tilde{d}^{(l)}_i\right)^{\top}}
 \end{align*}
 
 \begin{align*}
@@ -103,7 +103,7 @@ With $A^{(l)}_{-i}=A^{(l)}-{\tilde{a}^{(l)}_i}^{\top}\tilde{a}^{(l)}_i$ and $D^{
 	&= ...
 \end{align*}
 
-In the case of KFAC FIM: $A^{(l)}_{-i}\otimes D^{(l)}_{-i}=A^{(l)}\otimes D^{(l)}-{\tilde{a}^{(l)}_i}^{\top}\tilde{a}^{(l)}_i\otimes D^{(l)}-A^{(l)}\otimes{\tilde{d}^{(l)}_i}^{\top}\tilde{d}^{(l)}_i+{\tilde{a}^{(l)}_i}^{\top}\tilde{a}^{(l)}_i\otimes{\tilde{d}^{(l)}_i}^{\top}\tilde{d}^{(l)}_i$.
+In the case of KFAC FIM: $A^{(l)}_{-i}\otimes D^{(l)}_{-i}=A^{(l)}\otimes D^{(l)}-\left(\tilde{a}^{(l)}_i\right)^{\top}\tilde{a}^{(l)}_i\otimes D^{(l)}-A^{(l)}\otimes\left(\tilde{d}^{(l)}_i\right)^{\top}\tilde{d}^{(l)}_i+\left(\tilde{a}^{(l)}_i\right)^{\top}\tilde{a}^{(l)}_i\otimes\left(\tilde{d}^{(l)}_i\right)^{\top}\tilde{d}^{(l)}_i$.
 
 \paragraph{EKFAC FIM.}
 We note $\gamma^{(l)}_i=g^{(l)}_i\left(V^{(l)}_A\otimes V^{(l)}_D\right)$ the gradient in the Kronecker-factored eigenbasis and $\Lambda^{(l)}_j=\sum_k{\psi^{(l)}_{kj}}^2$. Keeping the eigenbasis fixed, $\Lambda^{(l)}_{-i,j}=\Lambda^{(l)}_j-{\psi^{(l)}_{ij}}^2$, so:

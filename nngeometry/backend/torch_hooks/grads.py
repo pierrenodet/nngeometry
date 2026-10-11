@@ -183,8 +183,8 @@ class LinearJacobianFactory(JacobianFactory):
         elif gy.ndim == 3:
             if layer.has_bias():
                 x = torch.cat([x, torch.ones_like(x[:, :, :1])], dim=2)
-            gy_kfe = torch.mm(gy.view(-1, gy_s[2]), evecs_g)
-            x_kfe = torch.mm(x.view(-1, evecs_a.size(0)), evecs_a)
+            gy_kfe = torch.mm(gy.reshape(-1, gy_s[2]), evecs_g)
+            x_kfe = torch.mm(x.reshape(-1, evecs_a.size(0)), evecs_a)
 
             per_ex_kfe_grad = torch.bmm(
                 gy_kfe.view(*gy_s).transpose(1, 2), x_kfe.view(x_s[0], x_s[1], -1)
