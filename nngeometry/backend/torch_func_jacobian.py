@@ -10,7 +10,7 @@ from ._backend import AbstractBackend
 
 def fvp(func, primals, tangents):
     _, jvp_out = torch.func.jvp(
-        lambda p: func(p),
+        func,
         primals=(primals,),
         tangents=(tangents,),
     )
@@ -20,6 +20,19 @@ def fvp(func, primals, tangents):
 
 def batched_fvp(func, primals, batched_tangents):
     return torch.vmap(lambda tangents: fvp(func, primals, tangents))(batched_tangents)
+
+
+def jvp(func, primals, tangents):
+    _, jvp_out = torch.func.jvp(
+        func,
+        primals=(primals,),
+        tangents=(tangents,),
+    )
+    return jvp_out
+
+
+def batched_jvp(func, primals, batched_tangents):
+    return torch.vmap(lambda tangents: jvp(func, primals, tangents))(batched_tangents)
 
 
 class TorchFuncJacobianBackend(AbstractBackend):
@@ -153,3 +166,105 @@ class TorchFuncJacobianBackend(AbstractBackend):
         return PFMapDense.from_dict(
             generator=None, data_dict=output_dict, layer_collection=layer_collection
         )
+
+    def implicit_vTMv(self, v, examples, layer_collection):
+        layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
+        device = self._check_same_device(layerid_to_mod.values())
+
+        loader = self._get_dataloader(examples)
+        n_examples = len(loader.sampler)
+
+        def function(params, inputs, targets=None):
+            predictions = torch.func.functional_call(self.model, params, (inputs,))
+            if targets is None:
+                return self.function(predictions)
+            else:
+                return self.function(predictions, targets)
+
+        params_dict = dict(layer_collection.named_parameters(layerid_to_mod))
+
+        v_dict = {}  # replace with function in PVector ?
+        for key, value in v.to_dict().items():
+            if len(value) > 1:
+                v_dict[key + ".weight"] = value[0]
+                v_dict[key + ".bias"] = value[1]
+            else:
+                v_dict[key + ".weight"] = value[0]
+
+        acc = 0
+        for d in self._get_iter_loader(loader):
+            inputs = d[0].to(device)
+            if len(d) > 1:
+                targets = d[1].to(device)
+            else:
+                targets = None
+
+            with torch.no_grad():
+                acc += (
+                    jvp(
+                        partial(function, inputs=inputs, targets=targets),
+                        params_dict,
+                        v_dict,
+                    )
+                    ** 2
+                ).sum()
+        acc /= n_examples
+
+        return acc
+
+    def implicit_mapTMmap(self, pfmap, examples, layer_collection, reduction="sum"):
+        layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
+        device = self._check_same_device(layerid_to_mod.values())
+
+        loader = self._get_dataloader(examples)
+        n_examples = len(loader.sampler)
+
+        def function(params, inputs, targets):
+            predictions = torch.func.functional_call(self.model, params, (inputs,))
+            if targets is None:
+                return self.function(predictions)
+            else:
+                return self.function(predictions, targets)
+
+        so, sb, *_ = pfmap.size()
+
+        params_dict = dict(layer_collection.named_parameters(layerid_to_mod))
+
+        pfmap_dict = {}
+        for layer_id, layer in layer_collection.layers.items():
+            d = pfmap.to_torch_layer(layer_id)
+            if layer.has_bias():
+                pfmap_dict[layer_id + ".weight"] = d[0].view(-1, *layer.weight.size)
+                pfmap_dict[layer_id + ".bias"] = d[1].view(-1, *layer.bias.size)
+            else:
+                pfmap_dict[layer_id + ".weight"] = d[0].view(-1, *layer.weight.size)
+
+        einsum_expr = {
+            "sum": "onp, onp->n",
+            "diagonal": "onp, onp->no",
+            "full": "onp, Onp->noO",
+            "gram": "onp, ONp->noNO",
+        }
+
+        acc = 0
+        for d in self._get_iter_loader(loader):
+            inputs = d[0].to(device)
+            if len(d) > 1:
+                targets = d[1].to(device)
+            else:
+                targets = None
+
+            with torch.no_grad():
+                batched_jvp_mb = batched_jvp(
+                    partial(function, inputs=inputs, targets=targets),
+                    params_dict,
+                    pfmap_dict,
+                ).view(so, sb, -1)
+
+                acc += torch.einsum(
+                    einsum_expr[reduction], batched_jvp_mb, batched_jvp_mb
+                )
+
+        acc /= n_examples
+
+        return acc
