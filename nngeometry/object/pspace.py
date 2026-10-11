@@ -1441,7 +1441,18 @@ class PMatImplicit(PMatAbstract):
                 v, self.examples, layer_collection=self.layer_collection
             )
         else:
-            return v.dot(self.mv(v))
+            return super().vTMv(v)
+
+    def mapTMmap(self, pfmap, reduction="sum"):
+        if hasattr(self.generator, "implicit_mapTMmap"):
+            return self.generator.implicit_mapTMmap(
+                pfmap,
+                self.examples,
+                layer_collection=self.layer_collection,
+                reduction=reduction,
+            )
+        else:
+            return super().mapTMmap(pfmap, reduction=reduction)
 
     def trace(self):
         if hasattr(self.generator, "implicit_trace"):
