@@ -51,7 +51,13 @@ from nngeometry.jacobian import Jacobian
 from nngeometry.layercollection import LayerCollection
 from nngeometry.metrics import FIM, FIM_MonteCarlo, sqrt_var_classif_logits
 from nngeometry.object.fspace import FMatDense
-from nngeometry.object.map import PFMapAdjoint, PFMapDense, PFMapFactored, random_pfmap
+from nngeometry.object.map import (
+    PFMapAdjoint,
+    PFMapDense,
+    PFMapFactored,
+    PFMapImplicit,
+    random_pfmap,
+)
 from nngeometry.object.pspace import (
     PMatBlockDiag,
     PMatDense,
@@ -84,6 +90,9 @@ args.runs = 1
 args.seed = 1337
 args.strategy = "kfac"
 args.solver = "eigh"
+# args.device = "cuda"
+# args.repr = "F_i"
+# args.regul = 1e-4
 
 os.makedirs(args.output_dir, exist_ok=True)
 
@@ -236,7 +245,7 @@ for i, (c, d) in enumerate(
                     lambda outputs, targets: sqrt_var_classif_logits(outputs),
                     verbose=True,
                 )
-                preco_repr = partial(PMatEKFAC, strategy="one_iter_kpsvd")
+                preco_repr = partial(PMatEKFAC, strategy=args.strategy)
                 preco_backend = TorchHooksJacobianBackend(model, func, verbose=True)
 
             lc = supported_kfac_layers(
@@ -352,8 +361,7 @@ for i, (c, d) in enumerate(
         leverages_loo = []
         det_schurs = []
         cooks = []
-        baseline_self_influences = []
-        baseline_leverages = []
+
         if isinstance(F, PMatLowRank):
             if args.regul_type == "trace":
                 regul = args.regul * avg_lam
@@ -417,230 +425,108 @@ for i, (c, d) in enumerate(
                     + loo_effect.transpose(1, 2) @ loo_effect
                 )
         elif isinstance(F, PMatEKFAC):
-            regul = args.regul * avg_lam if args.regul_type == "trace" else args.regul
+            evecs, evals = F.data
 
-            F_implicit = PMatImplicit(
-                generator=TorchFuncJacobianBackend(
-                    model,
-                    lambda outputs, targets: sqrt_var_classif_logits(outputs),
-                    verbose=False,
-                ),
-                examples=DataLoader(noisy_train_set, batch_size=128, shuffle=False),
-                layer_collection=lc,
-            )
-
-            # evecs, evals = F.data
-            start = 0
             for batch, (inputs, targets) in enumerate(tqdm(light_noisy_noaug)):
-                # self_influence = []
-                # self_influence_loo = []
-                # leverage = []
-                # leverage_loo = []
-                # cook = []
+                batch_size = inputs.shape[0]
+                self_influence = []
+                self_influence_loo = []
+                leverage = []
+                leverage_loo = []
+                cook = []
                 pfmap_func = Jacobian(
                     model,
                     (inputs, targets),
                     function=func,
                     layer_collection=lc,
-                    representation=PFMapDense,
+                    representation=PFMapFactored,
                 )
                 pfmap_grad = Jacobian(
                     model,
                     (inputs, targets),
                     function=loss,
                     layer_collection=lc,
-                    representation=PFMapDense,
+                    representation=PFMapFactored,
                 )
-                # for layer_id, layer in lc.layers.items():
-                #     if args.regul_type == "trace":
-                #         regul = args.regul * evals[layer_id].mean()
-                #     else:
-                #         regul = args.regul
-                #     Ga, Gg = pfmap_grad.data[layer_id]
-                #     Ja, Jg = pfmap_func.data[layer_id]
+                for layer_id, layer in lc.layers.items():
+                    if args.regul_type == "trace":
+                        regul = args.regul * evals[layer_id].mean()
+                    else:
+                        regul = args.regul
+                    Ga, Gg = pfmap_grad.data[layer_id]
+                    Ja, Jg = pfmap_func.data[layer_id]
 
-                #     Ga_kfe = Ga @ evecs[layer_id][0]
-                #     Gg_kfe = Gg @ evecs[layer_id][1]
+                    Ga_kfe = Ga @ evecs[layer_id][0]
+                    Gg_kfe = Gg @ evecs[layer_id][1]
 
-                #     Ja_kfe = Ga_kfe
-                #     Jg_kfe = Jg @ evecs[layer_id][1]
+                    Ja_kfe = Ga_kfe
+                    Jg_kfe = Jg @ evecs[layer_id][1]
 
-                #     D = evals[layer_id].view(Jg_kfe.size(-1), Ja_kfe.size(-1))
-                #     D_loo = D - torch.einsum(
-                #         "onsg,onSg,nsa,nSa->nga", Jg_kfe, Jg_kfe, Ja_kfe, Ja_kfe
-                #     )
-
-                #     # self_influence.append(
-                #     #     torch.einsum(
-                #     #         "onsg,OnSg,nsa,nSa,ga->noO",
-                #     #         Gg_kfe,
-                #     #         Gg_kfe,
-                #     #         Ga_kfe,
-                #     #         Ga_kfe,
-                #     #         1 / (D + regul),
-                #     #     )
-                #     # )
-                #     # self_influence_loo.append(
-                #     #     torch.einsum(
-                #     #         "onsg,OnSg,nsa,nSa,nga->noO",
-                #     #         Gg_kfe,
-                #     #         Gg_kfe,
-                #     #         Ga_kfe,
-                #     #         Ga_kfe,
-                #     #         1 / (D_loo + regul),
-                #     #     )
-                #     # )
-                #     # leverage.append(
-                #     #     torch.einsum(
-                #     #         "onsg,OnSg,nsa,nSa,ga->noO",
-                #     #         Jg_kfe,
-                #     #         Jg_kfe,
-                #     #         Ja_kfe,
-                #     #         Ja_kfe,
-                #     #         1 / (D + regul),
-                #     #     )
-                #     # )
-                #     # leverage_loo.append(
-                #     #     torch.einsum(
-                #     #         "onsg,OnSg,nsa,nSa,nga->noO",
-                #     #         Jg_kfe,
-                #     #         Jg_kfe,
-                #     #         Ja_kfe,
-                #     #         Ja_kfe,
-                #     #         1 / (D_loo + regul),
-                #     #     )
-                #     # )
-                #     # cook.append(
-                #     #     torch.einsum(
-                #     #         "onsg,OnSg,nsa,nSa,nga->noO",
-                #     #         Gg_kfe,
-                #     #         Gg_kfe,
-                #     #         Ga_kfe,
-                #     #         Ga_kfe,
-                #     #         (D + regul) / (D_loo + regul) ** 2,
-                #     #     )
-                #     # )
-
-                # self_influences.append(
-                #     torch.stack(self_influence, dim=0).detach().cpu()
-                # )
-                # self_influences_loo.append(
-                #     torch.stack(self_influence_loo, dim=0).detach().cpu()
-                # )
-                # leverages.append(torch.stack(leverage, dim=0).detach().cpu())
-                # leverages_loo.append(torch.stack(leverage_loo, dim=0).detach().cpu())
-                # cooks.append(torch.stack(cook, dim=0).detach().cpu())
-
-                # ONE STEP CG
-                # batch_size = inputs.shape[0]
-                # query = indices[start : start + batch_size]
-                # start += batch_size
-                # pool = torch.argwhere(~torch.isin(torch.arange(N), query)).flatten()
-                # sample = pool[torch.randperm(pool.numel())[:128]]
-                # F_implicit.examples = DataLoader(
-                #     subset(noisy_train_set, sample), batch_size=16, shuffle=False
-                # )
-
-                V = F.solve(pfmap_func, regul=regul)
-
-                if args.rank is not None:
-                    _, _, Vh = torch.linalg.svd(
-                        V.to_torch().permute(1, 0, 2).contiguous(),
-                        full_matrices=False,
-                    )
-                    V = PFMapDense(
-                        V.layer_collection,
-                        V.generator,
-                        data=Vh[:, : args.rank, :].permute(1, 0, 2).contiguous(),
-                    )
-                else:
-                    Q, _ = torch.linalg.qr(
-                        V.to_torch().permute(1, 2, 0).contiguous(),
-                        mode="reduced",
-                    )
-                    V = PFMapDense(
-                        V.layer_collection,
-                        V.generator,
-                        data=Q.permute(2, 0, 1).contiguous(),
+                    D = evals[layer_id].view(Jg_kfe.size(-1), Ja_kfe.size(-1))
+                    D_loo = D - torch.einsum(
+                        "onsg,onSg,nsa,nSa->nga", Jg_kfe, Jg_kfe, Ja_kfe, Ja_kfe
                     )
 
-                gV = torch.einsum("onp, Onp->noO", pfmap_grad.to_torch(), V.to_torch())
-                JV = torch.einsum("onp, Onp->noO", pfmap_func.to_torch(), V.to_torch())
-
-                # VFV_loo = (N - 1) * F_implicit.mapTMmap(
-                #     V, reduction="full"
-                # ) + regul * torch.einsum("onp, Onp->noO", V.to_torch(), V.to_torch())
-                # VFV = VFV_loo + JV.transpose(-1, -2) @ JV
-
-                # VFV = (
-                #     (N - batch_size) * F_implicit.mapTMmap(V, reduction="full")
-                #     + regul * torch.einsum("onp, Onp->noO", V.to_torch(), V.to_torch())
-                #     + torch.einsum(
-                #         "akp,onp,akq,Onq->noO",
-                #         pfmap_func.to_torch(),
-                #         V.to_torch(),
-                #         pfmap_func.to_torch(),
-                #         V.to_torch(),
-                #     )
-                # )
-                # VFV_loo = VFV - JV.transpose(-1, -2) @ JV
-
-                VFV = N * F_implicit.mapTMmap(
-                    V, reduction="full"
-                ) + regul * torch.einsum("onp, Onp->noO", V.to_torch(), V.to_torch())
-                VFV_loo = VFV - JV.transpose(-1, -2) @ JV
+                    self_influence.append(
+                        torch.einsum(
+                            "onsg,OnSg,nsa,nSa,ga->noO",
+                            Gg_kfe,
+                            Gg_kfe,
+                            Ga_kfe,
+                            Ga_kfe,
+                            1 / (D + regul),
+                        )
+                    )
+                    self_influence_loo.append(
+                        torch.einsum(
+                            "onsg,OnSg,nsa,nSa,nga->noO",
+                            Gg_kfe,
+                            Gg_kfe,
+                            Ga_kfe,
+                            Ga_kfe,
+                            1 / (D_loo + regul),
+                        )
+                    )
+                    leverage.append(
+                        torch.einsum(
+                            "onsg,OnSg,nsa,nSa,ga->noO",
+                            Jg_kfe,
+                            Jg_kfe,
+                            Ja_kfe,
+                            Ja_kfe,
+                            1 / (D + regul),
+                        )
+                    )
+                    leverage_loo.append(
+                        torch.einsum(
+                            "onsg,OnSg,nsa,nSa,nga->noO",
+                            Jg_kfe,
+                            Jg_kfe,
+                            Ja_kfe,
+                            Ja_kfe,
+                            1 / (D_loo + regul),
+                        )
+                    )
+                    cook.append(
+                        torch.einsum(
+                            "onsg,OnSg,nsa,nSa,nga->noO",
+                            Gg_kfe,
+                            Gg_kfe,
+                            Ga_kfe,
+                            Ga_kfe,
+                            (D + regul) / (D_loo + regul) ** 2,
+                        )
+                    )
 
                 self_influences.append(
-                    (gV @ torch.linalg.solve(VFV, gV.transpose(-1, -2)))[None, ...]
-                    .detach()
-                    .cpu()
+                    torch.stack(self_influence, dim=0).detach().cpu()
                 )
                 self_influences_loo.append(
-                    (gV @ torch.linalg.solve(VFV_loo, gV.transpose(-1, -2)))[None, ...]
-                    .detach()
-                    .cpu()
+                    torch.stack(self_influence_loo, dim=0).detach().cpu()
                 )
-                leverages.append(
-                    (JV @ torch.linalg.solve(VFV, JV.transpose(-1, -2)))[None, ...]
-                    .detach()
-                    .cpu()
-                )
-                leverages_loo.append(
-                    (JV @ torch.linalg.solve(VFV_loo, JV.transpose(-1, -2)))[None, ...]
-                    .detach()
-                    .cpu()
-                )
-                cooks.append(
-                    (
-                        torch.linalg.solve(VFV_loo, gV.transpose(-1, -2)).transpose(
-                            -1, -2
-                        )
-                        @ VFV
-                        @ torch.linalg.solve(VFV_loo, gV.transpose(-1, -2))
-                    )[None, ...]
-                    .detach()
-                    .cpu()
-                )
-
-                baseline_self_influences.append(
-                    torch.einsum(
-                        "onp, Onp->noO",
-                        pfmap_grad.to_torch(),
-                        F.solve(pfmap_grad, regul=regul).to_torch(),
-                    )[None, ...]
-                    .detach()
-                    .cpu()
-                )
-
-                baseline_leverages.append(
-                    torch.einsum(
-                        "onp, Onp->noO",
-                        pfmap_func.to_torch(),
-                        F.solve(pfmap_func, regul=regul).to_torch(),
-                    )[None, ...]
-                    .detach()
-                    .cpu()
-                )
+                leverages.append(torch.stack(leverage, dim=0).detach().cpu())
+                leverages_loo.append(torch.stack(leverage_loo, dim=0).detach().cpu())
+                cooks.append(torch.stack(cook, dim=0).detach().cpu())
 
         elif isinstance(F, PMatKFAC) and args.strategy == "kfac":
             if args.solver == "eigh":
@@ -1019,10 +905,85 @@ for i, (c, d) in enumerate(
                 preco_backend,
                 examples=DataLoader(noisy_train_set, batch_size=128, shuffle=False),
             )
-            preco.update_diag(
-                DataLoader(noisy_train_set, batch_size=128, shuffle=False)
-            )
+            if hasattr(preco, "update_diag"):
+                preco.update_diag(
+                    DataLoader(noisy_train_set, batch_size=128, shuffle=False)
+                )
+
+            # # OLD MULTI STEP CG
+            # for inputs, targets in tqdm(light_noisy_noaug):
+            #     pfmap_func = Jacobian(
+            #         model,
+            #         (inputs, targets),
+            #         function=func,
+            #         layer_collection=lc,
+            #     )
+            #     pfmap_grad = Jacobian(
+            #         model,
+            #         (inputs, targets),
+            #         function=loss,
+            #         layer_collection=lc,
+            #     )
+
+            #     # init = preco.solve(pfmap_grad, regul=args.regul)
+            #     FinvG = F.solve(
+            #         pfmap_grad,
+            #         regul=args.regul,
+            #         rtol=1e-3,
+            #         max_iter=1000,
+            #         # x0=init,
+            #         # M=preco,
+            #     )
+            #     FinvG_downdated = PMatImplicitLOO(F, pfmap_func, N).solve(
+            #         pfmap_grad,
+            #         regul=args.regul,
+            #         rtol=1e-3,
+            #         max_iter=1000,
+            #         # x0=update,
+            #         # M=preco,
+            #     )
+
+            #     self_influences.append(
+            #         torch.einsum(
+            #             "onp, Onp->noO", pfmap_grad.to_torch(), FinvG.to_torch()
+            #         )
+            #     )
+            #     self_influences_loo.append(
+            #         torch.einsum(
+            #             "onp, Onp->noO",
+            #             pfmap_grad.to_torch(),
+            #             FinvG_downdated.to_torch(),
+            #         )
+            #     )
+            #     leverages.append(self_influences[-1])
+            #     leverages_loo.append(self_influences_loo[-1])
+            #     cooks.append(F.mapTMmap(FinvG_downdated, reduction="full"))
+
+            # # PROBING Approach
+            # Z = (
+            #     2 * torch.randint(0, 2, (128, len(classes) - 1, N), device=args.device)
+            #     - 1
+            # )
+            # probes = [FVector(vector_repr=Z[i]) for i in range(Z.shape[0])]
+            # J_lazy = PFMapImplicit(
+            #     generator=TorchFuncJacobianBackend(
+            #         model,
+            #         lambda outputs, targets: sqrt_var_classif_logits(outputs),
+            #         verbose=False,
+            #     ),
+            #     examples=DataLoader(noisy_train_set, batch_size=128, shuffle=False),
+            #     layer_collection=lc,
+            # )
+            # projections = torch.stack(
+            #     [J_lazy.vjp(probe).to_torch() for probe in tqdm(probes)],
+            #     dim=0,
+            # )
+
+            # ONE STEP CG
+            preco = N * preco
+            start = 0
             for inputs, targets in tqdm(light_noisy_noaug):
+                batch_size = inputs.shape[0]
                 pfmap_func = Jacobian(
                     model,
                     (inputs, targets),
@@ -1036,45 +997,117 @@ for i, (c, d) in enumerate(
                     layer_collection=lc,
                 )
 
-                # init = preco.solve(pfmap_grad, regul=args.regul)
-                FinvG = F.solve(
-                    pfmap_grad,
-                    regul=args.regul,
-                    rtol=1e-3,
-                    max_iter=1000,
-                    # x0=init,
-                    # M=preco,
+                # STOCHASTIC Approach
+                # batch_size = inputs.shape[0]
+                # query = indices[start : start + batch_size]
+                # start += batch_size
+                # pool = torch.argwhere(~torch.isin(torch.arange(N), query)).flatten()
+                # sample = pool[torch.randperm(pool.numel())[:128]]
+                # F.examples = DataLoader(
+                #     subset(noisy_train_set, sample), batch_size=16, shuffle=False
+                # )
+
+                V = preco.solve(pfmap_func, regul=regul)
+
+                if args.rank is not None:
+                    _, _, Vh = torch.linalg.svd(
+                        V.to_torch().permute(1, 0, 2).contiguous(),
+                        full_matrices=False,
+                    )
+                    V = PFMapDense(
+                        V.layer_collection,
+                        V.generator,
+                        data=Vh[:, : args.rank, :].permute(1, 0, 2).contiguous(),
+                    )
+                else:
+                    Q, _ = torch.linalg.qr(
+                        V.to_torch().permute(1, 2, 0).contiguous(),
+                        mode="reduced",
+                    )
+                    V = PFMapDense(
+                        V.layer_collection,
+                        V.generator,
+                        data=Q.permute(2, 0, 1).contiguous(),
+                    )
+
+                gV = torch.einsum("onp, Onp->noO", pfmap_grad.to_torch(), V.to_torch())
+                JV = torch.einsum("onp, Onp->noO", pfmap_func.to_torch(), V.to_torch())
+
+                # STOCHASTIC Approach
+                # VFV_loo = (N - 1) * F_implicit.mapTMmap(
+                #     V, reduction="full"
+                # ) + regul * torch.einsum("onp, Onp->noO", V.to_torch(), V.to_torch())
+                # VFV = VFV_loo + JV.transpose(-1, -2) @ JV
+
+                # VFV = (
+                #     (N - batch_size) * F_implicit.mapTMmap(V, reduction="full")
+                #     + regul * torch.einsum("onp, Onp->noO", V.to_torch(), V.to_torch())
+                #     + torch.einsum(
+                #         "akp,onp,akq,Onq->noO",
+                #         pfmap_func.to_torch(),
+                #         V.to_torch(),
+                #         pfmap_func.to_torch(),
+                #         V.to_torch(),
+                #     )
+                # )
+                # VFV_loo = VFV - JV.transpose(-1, -2) @ JV
+
+                VFV = N * F.mapTMmap(V, reduction="full") + regul * torch.einsum(
+                    "onp, Onp->noO", V.to_torch(), V.to_torch()
                 )
-                FinvG_downdated = PMatImplicitLOO(F, pfmap_func, N).solve(
-                    pfmap_grad,
-                    regul=args.regul,
-                    rtol=1e-3,
-                    max_iter=1000,
-                    # x0=update,
-                    # M=preco,
-                )
+                VFV_loo = VFV - JV.transpose(-1, -2) @ JV
+
+                # PROBE Approach
+                # T = torch.einsum("onp, rp->rno", V.to_torch(), projections)
+                # T_loo = T - torch.einsum(
+                #     "noO, ron->rno", JV, Z[:, :, start : start + batch_size]
+                # )
+                # VFV_loo = torch.einsum(
+                #     "rno,rnO->noO",
+                #     T_loo,
+                #     T_loo,
+                # ) / len(probes) + regul * torch.einsum(
+                #     "onp, Onp->noO", V.to_torch(), V.to_torch()
+                # )
+                # VFV = VFV_loo + JV.transpose(-1, -2) @ JV
 
                 self_influences.append(
-                    torch.einsum(
-                        "onp, Onp->noO", pfmap_grad.to_torch(), FinvG.to_torch()
-                    )
+                    (gV @ torch.linalg.solve(VFV, gV.transpose(-1, -2)))[None, ...]
+                    .detach()
+                    .cpu()
                 )
                 self_influences_loo.append(
-                    torch.einsum(
-                        "onp, Onp->noO",
-                        pfmap_grad.to_torch(),
-                        FinvG_downdated.to_torch(),
-                    )
+                    (gV @ torch.linalg.solve(VFV_loo, gV.transpose(-1, -2)))[None, ...]
+                    .detach()
+                    .cpu()
                 )
-                leverages.append(self_influences[-1])
-                leverages_loo.append(self_influences_loo[-1])
+                leverages.append(
+                    (JV @ torch.linalg.solve(VFV, JV.transpose(-1, -2)))[None, ...]
+                    .detach()
+                    .cpu()
+                )
+                # det_schurs.append(
+                #     (torch.logdet(VFV_loo) - torch.logdet(VFV))[None, ..., None, None]
+                #     .detach()
+                #     .cpu()
+                # )
+                leverages_loo.append(
+                    (JV @ torch.linalg.solve(VFV_loo, JV.transpose(-1, -2)))[None, ...]
+                    .detach()
+                    .cpu()
+                )
                 cooks.append(
-                    torch.einsum(
-                        "onp, Onp->noO",
-                        FinvG_downdated.to_torch(),
-                        (F @ FinvG_downdated.adjoint()).adjoint().to_torch(),
-                    )
+                    (
+                        torch.linalg.solve(VFV_loo, gV.transpose(-1, -2)).transpose(
+                            -1, -2
+                        )
+                        @ VFV
+                        @ torch.linalg.solve(VFV_loo, gV.transpose(-1, -2))
+                    )[None, ...]
+                    .detach()
+                    .cpu()
                 )
+                start += batch_size
 
         # %%
         if self_influences[0].ndim == 3:
@@ -1089,10 +1122,6 @@ for i, (c, d) in enumerate(
             leverages = torch.cat(leverages, dim=1)
             leverages_loo = torch.cat(leverages_loo, dim=1)
             cooks = torch.cat(cooks, dim=1)
-
-        if len(baseline_self_influences) > 0:
-            baseline_self_influences = torch.cat(baseline_self_influences, dim=1)
-            baseline_leverages = torch.cat(baseline_leverages, dim=1)
 
         # %%
         residuals = []
@@ -1131,20 +1160,16 @@ for i, (c, d) in enumerate(
                 )
             )
 
-        if len(baseline_self_influences) > 0:
-            for scores in [
-                baseline_self_influences,
-                baseline_leverages,
-            ]:
-                print(
-                    roc_auc_score(
-                        noisy_examples[indices],
-                        torch.diagonal(scores, dim1=-2, dim2=-1)
-                        .sum(dim=-1)
-                        .sum(dim=0)
-                        .numpy(force=True),
-                    )
+        for scores in [leverages, leverages_loo]:
+            print(
+                roc_auc_score(
+                    noisy_examples[indices],
+                    torch.linalg.eigvalsh(scores)
+                    .amax(dim=-1)
+                    .sum(dim=0)
+                    .numpy(force=True),
                 )
+            )
 
         for scores, scores_loo in [
             (self_influences, self_influences_loo),
@@ -1220,10 +1245,10 @@ for i, (c, d) in enumerate(
             epoch = run.require_group(f"epoch_{epochs[e]}")
             epoch.attrs.update(
                 {
-                    # "gold_train_accuracy": gold_train_accuracy,
-                    # "gold_test_accuracy": gold_test_accuracy,
-                    # "gold_train_loss": gold_train_loss,
-                    # "gold_test_loss": gold_test_loss,
+                    "gold_train_accuracy": gold_train_accuracy,
+                    "gold_test_accuracy": gold_test_accuracy,
+                    "gold_train_loss": gold_train_loss,
+                    "gold_test_loss": gold_test_loss,
                     "none_ntrain_accuracy": none_ntrain_accuracy,
                     "none_ntrain_loss": none_ntrain_loss,
                     "none_train_accuracy": none_train_accuracy,
