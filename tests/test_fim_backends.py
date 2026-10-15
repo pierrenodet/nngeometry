@@ -12,9 +12,9 @@ from tasks import (
 
 from nngeometry.backend.torch_func_jacobian import TorchFuncJacobianBackend
 from nngeometry.backend.torch_hooks.torch_hooks import TorchHooksJacobianBackend
-from nngeometry.object.map import random_pfmap
+from nngeometry.object.map import PFMapDense, PFMapImplicit, random_pfmap
 from nngeometry.object.pspace import PMatImplicit
-from nngeometry.object.vector import random_pvector
+from nngeometry.object.vector import random_fvector, random_pvector
 
 linear_tasks = [
     get_linear_fc_task,
@@ -60,3 +60,24 @@ def test_torch_hooks_vs_torch_func_fim():
         x = random_pfmap(lc, (10, 3))
         torch.testing.assert_close(F_hook.mmap(x).to_torch(), F_func.mmap(x).to_torch())
         torch.testing.assert_close(F_hook.mapTMmap(x), F_func.mapTMmap(x))
+
+
+def test_jacobian_implicit_backends():
+    for get_task in nonlinear_tasks:
+        loader, lc, parameters, model, function = get_task()
+
+        jacobian_hook = PFMapDense(
+            lc,
+            TorchHooksJacobianBackend(model, lambda inputs, targets: model(inputs)),
+            examples=loader,
+        )
+        jacobian_func = PFMapImplicit(
+            lc,
+            TorchFuncJacobianBackend(model, lambda outputs, targets: outputs),
+            examples=loader,
+        )
+
+        df = random_fvector(jacobian_hook.size(1), n_output=jacobian_hook.size(0))
+        torch.testing.assert_close(
+            jacobian_hook.vjp(df).to_torch(), jacobian_func.vjp(df).to_torch()
+        )

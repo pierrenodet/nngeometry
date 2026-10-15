@@ -204,6 +204,12 @@ class PFMapImplicit(PFMap):
     def batched_jvp(self, pfmap):
         raise NotImplementedError()
 
+    def vjp(self, v):
+        if hasattr(self.generator, "implicit_vJ"):
+            return self.generator.implicit_vJ(v, self.examples, self.layer_collection)
+        else:
+            raise NotImplementedError()
+
 
 def random_pfmap(layer_collection, output_size, device=None, dtype=torch.float64):
     """
