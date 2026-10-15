@@ -103,11 +103,16 @@ def fit(
     epochs,
     device,
     verbose=True,
-    forget=False,
     augmentations=[],
+    scheduler=None,
 ):
     model.train()
     loss_fn = make_loss_fn(None)
+
+    use_bf16 = False
+    if device == "cuda":
+        use_bf16 = torch.cuda.is_bf16_supported(including_emulation=False)
+
     if verbose:
         epochs = tqdm(range(epochs))
         # bar = epochs
@@ -117,19 +122,20 @@ def fit(
 
     def fn(model, inputs, labels):
         optimizer.zero_grad()
-        for aug in augmentations:
-            inputs = aug(inputs)
-        outputs = model(inputs)
-        loss = loss_fn(outputs, labels)
-        # if bar is not None:
-        #     bar.set_description(f"{round(loss.item(), 2)}")
-        if forget:
-            loss *= -1
+        with torch.autocast(device_type=device, dtype=torch.bfloat16, enabled=use_bf16):
+            for aug in augmentations:
+                inputs = aug(inputs)
+            outputs = model(inputs)
+            loss = loss_fn(outputs, labels)
+            # if bar is not None:
+            #     bar.set_description(f"{round(loss.item(), 2)}")
         loss.backward()
         optimizer.step()
 
     for _ in epochs:
         loop(fn, model, train, device)
+        if scheduler is not None:
+            scheduler.step()
     model.eval()
     return model
 
