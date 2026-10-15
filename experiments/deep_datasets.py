@@ -5,8 +5,8 @@ import torch
 from deep_models import (
     ResNet18,
     ResNet34,
-    TimeSeriesTransformer,
     ResNet50,
+    TimeSeriesTransformer,
     VisionTransformer,
 )
 from torch import nn, optim
@@ -81,7 +81,7 @@ class Experiment(NamedTuple):
     classes: list[str] = []
 
 
-class Residuals(torch.nn.Module):
+class Residual(torch.nn.Module):
     def __init__(self, module):
         super().__init__()
         self.module = module
@@ -138,7 +138,7 @@ DATASETS = {
             # nn.Linear(c * 2, c),
             # nn.Linear(28, c),
             *[
-                Residuals(
+                Residual(
                     nn.Sequential(
                         nn.LayerNorm(c),
                         nn.Linear(c, c * h),
@@ -191,8 +191,35 @@ DATASETS = {
             nn.ReLU(),
             nn.Linear(c, outputs),
         ),
-        # partial(optim.SGD, lr=1e-3, weight_decay=1e-2, momentum=0.9, nesterov=True),
-        partial(optim.AdamW, weight_decay=1e-2),
+        # # partial(optim.SGD, lr=1e-3, weight_decay=1e-2, momentum=0.9, nesterov=True),
+        # partial(optim.AdamW, weight_decay=1e-2),
+        # lambda outputs=10, c=64, h=4, d=2, k=3: nn.Sequential(
+        #     # nn.Conv2d(1, c, kernel_size=k, padding=k // 2),
+        #     # nn.GELU(),
+        #     # nn.AdaptiveAvgPool2d(1),
+        #     nn.Flatten(),
+        #     nn.Linear(784, c),
+        #     *[
+        #         Residuals(
+        #             nn.Sequential(
+        #                 nn.LayerNorm(c),
+        #                 nn.Linear(c, c * h),
+        #                 nn.GELU(),
+        #                 nn.Linear(c * h, c),
+        #             )
+        #         )
+        #         for _ in range(d)
+        #     ],
+        #     nn.LayerNorm(c),
+        #     nn.Linear(c, outputs),
+        # ),
+        partial(
+            torch.optim.SGD,
+            lr=5e-2,
+            momentum=0.9,
+            weight_decay=1e-4,
+            nesterov=True,
+        ),
         list(map(str, range(10))),
     ),
     "k-mnist": Experiment(
@@ -334,17 +361,66 @@ DATASETS = {
         # partial(datasets.CIFAR10, download=True),
         # partial(ResNet34, batch_norm=False),
         # partial(VGG, "VGG19"),
-        # partial(ResNet18, batch_norm=False),
-        lambda outputs=10: replace_torch_mha_with_nng_mha(
-            VisionTransformer(
-                outputs=outputs,
-                image_size=32,
-                patch_size=4,
-                hidden_size=256,
-                num_heads=4,
-                num_layers=6,
-            )
+        lambda outputs=10, norm=nn.BatchNorm2d: nn.Sequential(
+            nn.Sequential(
+                nn.Conv2d(3, 64, 3, stride=1, padding=1),
+                norm(64),
+                nn.ReLU(inplace=True),
+            ),
+            nn.Sequential(
+                nn.Conv2d(64, 128, 5, stride=2, padding=2),
+                norm(128),
+                nn.ReLU(inplace=True),
+            ),
+            Residual(
+                nn.Sequential(
+                    *[
+                        nn.Sequential(
+                            nn.Conv2d(128, 128, 3, stride=1, padding=1),
+                            norm(128),
+                            nn.ReLU(inplace=True),
+                        )
+                        for _ in range(2)
+                    ]
+                )
+            ),
+            nn.Sequential(
+                nn.Conv2d(128, 256, 3, stride=1, padding=1),
+                norm(256),
+                nn.ReLU(inplace=True),
+            ),
+            nn.MaxPool2d(2),
+            Residual(
+                nn.Sequential(
+                    *[
+                        nn.Sequential(
+                            nn.Conv2d(256, 256, 3, stride=1, padding=1),
+                            norm(256),
+                            nn.ReLU(inplace=True),
+                        )
+                        for _ in range(2)
+                    ]
+                )
+            ),
+            nn.Sequential(
+                nn.Conv2d(256, 128, 3, stride=1, padding=0),
+                norm(128),
+                nn.ReLU(inplace=True),
+            ),
+            nn.AdaptiveMaxPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(128, outputs, bias=False),
         ),
+        # lambda outputs=10: replace_torch_mha_with_nng_mha(
+        #     VisionTransformer(
+        #         outputs=outputs,
+        #         image_size=32,
+        #         patch_size=4,
+        #         hidden_size=256,
+        #         num_heads=4,
+        #         num_layers=6,
+        #     )
+        # ),
         # lambda outputs=10, c=64: nn.Sequential(
         #     nn.Conv2d(3, c, 3, stride=1, padding=1),
         #     nn.GELU(),
@@ -381,8 +457,18 @@ DATASETS = {
         # # nn.GELU(),
         # # nn.Linear(c * 4, outputs),
         # ),
-        # partial(optim.SGD, lr=1e-2, weight_decay=1e-4, momentum=0.9, nesterov=True),
-        partial(optim.AdamW, weight_decay=1e-2),
+        (
+            partial(
+                optim.SGD,
+                lr=1e-2,
+                weight_decay=1e-4,
+                momentum=0.9,
+                nesterov=True,
+                fused=True,
+            ),
+            partial(optim.lr_scheduler.MultiStepLR, milestones=[100, 150], gamma=0.1),
+        ),
+        # partial(optim.AdamW, weight_decay=1e-2),
         [
             "plane",
             "car",

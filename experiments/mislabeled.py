@@ -41,7 +41,7 @@ from deep_utils import (
 from matplotlib import pyplot as plt
 from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score
-from torch.utils.data import DataLoader, Subset, TensorDataset
+from torch.utils.data import Subset, TensorDataset
 from torchvision import transforms
 from tqdm import tqdm
 
@@ -82,10 +82,11 @@ add_default_arguments(parser, "mislabeled")
 parser.add_argument("--noise_ratio", type=float, default=0.25)
 parser.add_argument("--rank", type=int, default=None)
 parser.add_argument("--eval_size", type=int, default=None)
+parser.add_argument("--train_size", type=int, default=None)
 
 args = parser.parse_args()
 
-args.dataset = "mnist-1d"
+args.dataset = "cifar-10"
 args.runs = 1
 args.seed = 1337
 args.strategy = "kfac"
@@ -93,12 +94,19 @@ args.solver = "eigh"
 # args.device = "cuda"
 # args.repr = "F_i"
 # args.regul = 1e-4
+# args.regul_type = ""
+# args.eval_size = 1000
 
 os.makedirs(args.output_dir, exist_ok=True)
 
 torch.manual_seed(args.seed)
 
 transform, dataset, model_fn, optimizer_fn, classes = DATASETS[args.dataset]
+
+if isinstance(optimizer_fn, tuple):
+    optimizer_fn, scheduler_fn = optimizer_fn
+else:
+    scheduler_fn = None
 
 
 if transform is not None:
@@ -112,7 +120,10 @@ else:
 train_set = dataset(root=args.data_dir, train=True, transform=deterministic_transform)
 test_set = dataset(root=args.data_dir, train=False, transform=deterministic_transform)
 
-train_set = tensorize(train_set)
+train_size = len(train_set) if args.train_size is None else args.train_size
+train_idx = torch.randperm(len(train_set))[:train_size]
+
+train_set = subset(tensorize(train_set), train_idx)
 test_set = tensorize(test_set)
 
 DataLoader = lambda dataset, **kwargs: InMemoryDataLoader(  # noqa: E731
@@ -125,7 +136,7 @@ test = DataLoader(test_set, batch_size=1024)
 
 if "cifar" in args.dataset:
     max_batch_size = 128
-    # augmentations = [random_flip(0.5), random_crop(4)]  # , random_erase(0.5, 3)]
+    augmentations = [random_flip(0.5), random_crop(4)]  # , random_erase(0.5, 3)]
     augmentations = []
 else:
     max_batch_size = 128
@@ -155,26 +166,27 @@ noisy_train_set.tensors[1][noisy_examples] = noisy_labels
 
 noisy_train = DataLoader(noisy_train_set, batch_size=128, shuffle=True)
 
-epochs = (
-    [0]
-    + [1]
-    + [10]
-    + list(range(100, 1000, 100))
-    + list(range(1000, args.epochs + 1, 2000))
-)
-# epochs = [0, 500]
+# epochs = (
+#     [0]
+#     + [1]
+#     + [10]
+#     + list(range(100, 1000, 100))
+#     + list(range(1000, args.epochs + 1, 2000))
+# )
+epochs = [0, 25]
 # %%
-for i, (c, d) in enumerate(
-    chain(product([64], [2, 4, 8, 16]), product([32, 64, 128, 256, 512, 1024], [4]))
-):
-    # for i, (c, d) in enumerate([(128, 8)]):
-    model_fn = partial(model_fn, c=c, d=d, h=4)
+# for i, (c, d) in enumerate(
+#     chain(product([64], [2, 4, 8, 16]), product([32, 64, 128, 256, 512, 1024], [4]))
+# ):
+for i, (c, d) in enumerate([(256, 1)]):
+    # model_fn = partial(model_fn, c=c, d=d, h=2)
 
     model_clean = deepcopy(model_fn()).to(device=args.device)
     optimizer_clean = optimizer_fn(model_clean.parameters())
 
-    model = deepcopy(model_fn()).to(device=args.device)
+    model = torch.compile(deepcopy(model_fn()).to(device=args.device))
     optimizer = optimizer_fn(model.parameters())
+    scheduler = scheduler_fn(optimizer) if scheduler_fn is not None else None
 
     for e in range(1, len(epochs)):
         fit(
@@ -197,6 +209,7 @@ for i, (c, d) in enumerate(
             epochs[e] - epochs[e - 1],
             args.device,
             augmentations=augmentations,
+            scheduler=scheduler,
         )
         none_ntrain_accuracy, none_ntrain_loss = eval(model, noisy_train, args.device)
         none_train_accuracy, none_train_loss = eval(model, train, args.device)
@@ -204,6 +217,8 @@ for i, (c, d) in enumerate(
         print(none_ntrain_accuracy, none_ntrain_loss)
         print(none_train_accuracy, none_train_loss)
         print(none_test_accuracy, none_test_loss)
+
+        model = model._orig_mod
 
         def func(inputs, targets):
             return sqrt_var_classif_logits(model(inputs))
@@ -350,9 +365,9 @@ for i, (c, d) in enumerate(
         else:
             avg_lam = (F.trace() / F.layer_collection.numel()).item()
         eval_size = N if args.eval_size is None else args.eval_size
-        indices = torch.randperm(noisy_train_set.tensors[0].shape[0])[:eval_size]
+        eval_idx = torch.randperm(noisy_train_set.tensors[0].shape[0])[:eval_size]
         light_noisy_noaug = DataLoader(
-            subset(noisy_train_set, indices), shuffle=False, batch_size=32
+            subset(noisy_train_set, eval_idx), shuffle=False, batch_size=4
         )
 
         self_influences = []
@@ -870,6 +885,7 @@ for i, (c, d) in enumerate(
                 )
         elif isinstance(F, PMatImplicit):
             F.generator.verbose = False
+            regul = args.regul
 
             class PMatImplicitLOO(PMatImplicit):
                 def __init__(self, F, J, N):
@@ -909,6 +925,7 @@ for i, (c, d) in enumerate(
                 preco.update_diag(
                     DataLoader(noisy_train_set, batch_size=128, shuffle=False)
                 )
+            preco = N * preco
 
             # # OLD MULTI STEP CG
             # for inputs, targets in tqdm(light_noisy_noaug):
@@ -980,7 +997,6 @@ for i, (c, d) in enumerate(
             # )
 
             # ONE STEP CG
-            preco = N * preco
             start = 0
             for inputs, targets in tqdm(light_noisy_noaug):
                 batch_size = inputs.shape[0]
@@ -998,14 +1014,13 @@ for i, (c, d) in enumerate(
                 )
 
                 # STOCHASTIC Approach
-                # batch_size = inputs.shape[0]
-                # query = indices[start : start + batch_size]
-                # start += batch_size
-                # pool = torch.argwhere(~torch.isin(torch.arange(N), query)).flatten()
-                # sample = pool[torch.randperm(pool.numel())[:128]]
-                # F.examples = DataLoader(
-                #     subset(noisy_train_set, sample), batch_size=16, shuffle=False
-                # )
+                batch_size = inputs.shape[0]
+                query = eval_idx[start : start + batch_size]
+                pool = torch.argwhere(~torch.isin(torch.arange(N), query)).flatten()
+                sample = pool[torch.randperm(pool.numel())[:1024]]
+                F.examples = DataLoader(
+                    subset(noisy_train_set, sample), batch_size=32, shuffle=False
+                )
 
                 V = preco.solve(pfmap_func, regul=regul)
 
@@ -1034,13 +1049,28 @@ for i, (c, d) in enumerate(
                 JV = torch.einsum("onp, Onp->noO", pfmap_func.to_torch(), V.to_torch())
 
                 # STOCHASTIC Approach
-                # VFV_loo = (N - 1) * F_implicit.mapTMmap(
-                #     V, reduction="full"
-                # ) + regul * torch.einsum("onp, Onp->noO", V.to_torch(), V.to_torch())
+                VFV_loo = (N - 1) * F.mapTMmap(
+                    V, reduction="full"
+                ) + regul * torch.einsum("onp, Onp->noO", V.to_torch(), V.to_torch())
+                VFV = VFV_loo + JV.transpose(-1, -2) @ JV
+
+                # STO Test
+                # FV_loo = (N - 1) * F.mmap(V) + regul * V
+                # VFV_loo = torch.einsum(
+                #     "onp, Onp->noO", FV_loo.to_torch(), FV_loo.to_torch()
+                # )
                 # VFV = VFV_loo + JV.transpose(-1, -2) @ JV
 
+                # residuals = pfmap_grad.to_torch() - torch.einsum(
+                #     "onp, noO->Onp",
+                #     pfmap_func.to_torch(),
+                #     JV @ torch.linalg.solve(VFV_loo, gV.transpose(-1, -2)),
+                # )
+                # print((residuals**2).sum(dim=-1))
+
+                # STOCHASTIC Approach (different)
                 # VFV = (
-                #     (N - batch_size) * F_implicit.mapTMmap(V, reduction="full")
+                #     (N - batch_size) * F.mapTMmap(V, reduction="full")
                 #     + regul * torch.einsum("onp, Onp->noO", V.to_torch(), V.to_torch())
                 #     + torch.einsum(
                 #         "akp,onp,akq,Onq->noO",
@@ -1052,15 +1082,15 @@ for i, (c, d) in enumerate(
                 # )
                 # VFV_loo = VFV - JV.transpose(-1, -2) @ JV
 
-                VFV = N * F.mapTMmap(V, reduction="full") + regul * torch.einsum(
-                    "onp, Onp->noO", V.to_torch(), V.to_torch()
-                )
-                VFV_loo = VFV - JV.transpose(-1, -2) @ JV
+                # VFV = N * F.mapTMmap(V, reduction="full") + regul * torch.einsum(
+                #     "onp, Onp->noO", V.to_torch(), V.to_torch()
+                # )
+                # VFV_loo = VFV - JV.transpose(-1, -2) @ JV
 
                 # PROBE Approach
                 # T = torch.einsum("onp, rp->rno", V.to_torch(), projections)
                 # T_loo = T - torch.einsum(
-                #     "noO, ron->rno", JV, Z[:, :, start : start + batch_size]
+                #     "noO, ron->rno", JV, Z[:, :, eval_idx[start : start + batch_size]]
                 # )
                 # VFV_loo = torch.einsum(
                 #     "rno,rnO->noO",
@@ -1139,7 +1169,7 @@ for i, (c, d) in enumerate(
         pearson_residuals = torch.cat(pearson_residuals)
 
         for scores in [residuals, pearson_residuals]:
-            print(roc_auc_score(noisy_examples[indices], scores.numpy(force=True)))
+            print(roc_auc_score(noisy_examples[eval_idx], scores.numpy(force=True)))
 
         from scipy.stats import rankdata
 
@@ -1152,7 +1182,7 @@ for i, (c, d) in enumerate(
         ]:
             print(
                 roc_auc_score(
-                    noisy_examples[indices],
+                    noisy_examples[eval_idx],
                     torch.diagonal(scores, dim1=-2, dim2=-1)
                     .sum(dim=-1)
                     .sum(dim=0)
@@ -1163,7 +1193,7 @@ for i, (c, d) in enumerate(
         for scores in [leverages, leverages_loo]:
             print(
                 roc_auc_score(
-                    noisy_examples[indices],
+                    noisy_examples[eval_idx],
                     torch.linalg.eigvalsh(scores)
                     .amax(dim=-1)
                     .sum(dim=0)
@@ -1200,8 +1230,8 @@ for i, (c, d) in enumerate(
                 .numpy(force=True)
             )
             print(
-                shift[noisy_examples[indices]].mean(),
-                shift[~noisy_examples[indices]].mean(),
+                shift[noisy_examples[eval_idx]].mean(),
+                shift[~noisy_examples[eval_idx]].mean(),
             )
 
         for scores, scores_loo in [
@@ -1223,8 +1253,9 @@ for i, (c, d) in enumerate(
                     )
                 ).numpy(force=True),
                 s=1,
-                c=noisy_examples[indices],
+                c=noisy_examples[eval_idx],
             )
+            plt.axline((0, 0), slope=1, linestyle="--", color="black")
             plt.show()
         with h5py.File(
             os.path.join(args.output_dir, f"{result_file_name(args)}.h5"), "a"
@@ -1239,16 +1270,16 @@ for i, (c, d) in enumerate(
                     "regul": args.regul,
                     "regul_type": args.regul_type,
                     "seed": args.seed,
-                    "whiten": args.whiten if "F_kfac" == args.repr else "",
+                    "solver": args.solver,
                 }
             )
             epoch = run.require_group(f"epoch_{epochs[e]}")
             epoch.attrs.update(
                 {
-                    "gold_train_accuracy": gold_train_accuracy,
-                    "gold_test_accuracy": gold_test_accuracy,
-                    "gold_train_loss": gold_train_loss,
-                    "gold_test_loss": gold_test_loss,
+                    # "gold_train_accuracy": gold_train_accuracy,
+                    # "gold_test_accuracy": gold_test_accuracy,
+                    # "gold_train_loss": gold_train_loss,
+                    # "gold_test_loss": gold_test_loss,
                     "none_ntrain_accuracy": none_ntrain_accuracy,
                     "none_ntrain_loss": none_ntrain_loss,
                     "none_train_accuracy": none_train_accuracy,
@@ -1275,4 +1306,4 @@ for i, (c, d) in enumerate(
             )
             if "noisy_examples" not in run:
                 run.create_dataset("noisy_examples", data=noisy_examples.detach().cpu())
-                run.create_dataset("indices", data=indices.detach().cpu())
+                run.create_dataset("indices", data=eval_idx.detach().cpu())
