@@ -31,6 +31,11 @@ def jvp(func, primals, tangents):
     return jvp_out
 
 
+def vjp(func, primals, cotangents):
+    _, pullback = torch.func.vjp(func, primals)
+    return pullback(cotangents)[0]
+
+
 def batched_jvp(func, primals, batched_tangents):
     return torch.vmap(lambda tangents: jvp(func, primals, tangents))(batched_tangents)
 
@@ -167,6 +172,62 @@ class TorchFuncJacobianBackend(AbstractBackend):
             generator=None, data_dict=output_dict, layer_collection=layer_collection
         )
 
+    def implicit_vJ(self, v, examples, layer_collection):
+        layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
+        device = self._check_same_device(layerid_to_mod.values())
+
+        loader = self._get_dataloader(examples)
+        n_examples = len(loader.sampler)
+
+        def function(params, inputs, targets):
+            predictions = torch.func.functional_call(self.model, params, (inputs,))
+            if targets is None:
+                return self.function(predictions)
+            else:
+                return self.function(predictions, targets)
+
+        vt_flat = v.to_torch().t()
+        params_dict = dict(layer_collection.named_parameters(layerid_to_mod))
+
+        vjp_dict = {
+            k: torch.zeros(*p.shape, dtype=p.dtype, device=p.device)
+            for k, p in params_dict.items()
+        }
+
+        offset = 0
+
+        for d in self._get_iter_loader(loader):
+            inputs = d[0].to(device)
+            bs = inputs.shape[0]
+            if len(d) > 1:
+                targets = d[1].to(device)
+            else:
+                targets = None
+
+            with torch.no_grad():
+                vjp_dict_mb = vjp(
+                    partial(function, inputs=inputs, targets=targets),
+                    params_dict,
+                    vt_flat[offset : offset + bs],
+                )
+
+            for k in vjp_dict_mb:
+                vjp_dict[k] += vjp_dict_mb[k].detach()
+
+            offset += bs
+
+        output_dict = dict()
+        for layer_id, layer in layer_collection.layers.items():
+            if layer.has_bias():
+                output_dict[layer_id] = (
+                    vjp_dict[layer_id + ".weight"],
+                    vjp_dict[layer_id + ".bias"],
+                )
+            else:
+                output_dict[layer_id] = (vjp_dict[layer_id + ".weight"],)
+
+        return PVector(layer_collection, dict_repr=output_dict)
+
     def implicit_vTMv(self, v, examples, layer_collection):
         layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
         device = self._check_same_device(layerid_to_mod.values())
@@ -261,9 +322,7 @@ class TorchFuncJacobianBackend(AbstractBackend):
                     pfmap_dict,
                 ).view(so, sb, -1)
 
-                acc += torch.einsum(
-                    einsum_expr[reduction], batched_jvp_mb, batched_jvp_mb
-                )
+            acc += torch.einsum(einsum_expr[reduction], batched_jvp_mb, batched_jvp_mb)
 
         acc /= n_examples
 
