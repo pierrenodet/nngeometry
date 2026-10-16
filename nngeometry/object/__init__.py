@@ -1,4 +1,5 @@
 from .fspace import FMatDense
+from .logra import PMatLoGRA
 from .map import PFMapDense, PFMapFactored, PFMapImplicit
 from .pspace import (
     PMatBlockDiag,
@@ -33,4 +34,5 @@ __all__ = [
     "PMatMixed",
     "PMatEKFACBlockDiag",
     "PMatEye",
+    "PMatLoGRA",
 ]
