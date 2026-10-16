@@ -21,6 +21,8 @@ from copy import deepcopy
 from functools import partial
 from itertools import chain, product
 
+from nngeometry.object.logra import PMatLoGRA
+
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import h5py
@@ -92,7 +94,7 @@ args.seed = 1337
 args.strategy = "kfac"
 args.solver = "eigh"
 # args.device = "cuda"
-# args.repr = "F_i"
+# args.repr = "F_logra"
 # args.regul = 1e-4
 # args.regul_type = ""
 # args.eval_size = 1000
@@ -220,6 +222,8 @@ for i, (c, d) in enumerate([(256, 1)]):
 
         model = model._orig_mod
 
+        # %%
+
         def func(inputs, targets):
             return sqrt_var_classif_logits(model(inputs))
 
@@ -262,6 +266,11 @@ for i, (c, d) in enumerate([(256, 1)]):
                 )
                 preco_repr = partial(PMatEKFAC, strategy=args.strategy)
                 preco_backend = TorchHooksJacobianBackend(model, func, verbose=True)
+            elif "logra" in args.repr:
+                repr = partial(
+                    PMatLoGRA, representation=PMatDense, projections="kfac", rank=50
+                )
+                backend = TorchHooksJacobianBackend(model, func, verbose=True)
 
             lc = supported_kfac_layers(
                 LayerCollection.from_model(model, ignore_unsupported_layers=True)
@@ -1138,6 +1147,53 @@ for i, (c, d) in enumerate([(256, 1)]):
                     .cpu()
                 )
                 start += batch_size
+        elif isinstance(F, PMatLoGRA):
+            if args.regul_type == "trace":
+                regul = args.regul * avg_lam
+            else:
+                regul = args.regul
+            regul = 1e-2
+            print(F.size(0), F.F.size(0))
+            for inputs, targets in tqdm(light_noisy_noaug):
+                pfmap_func = Jacobian(
+                    model,
+                    (inputs, targets),
+                    function=func,
+                    layer_collection=lc,
+                    representation=PFMapFactored,
+                )
+                pfmap_grad = Jacobian(
+                    model,
+                    (inputs, targets),
+                    function=loss,
+                    layer_collection=lc,
+                    representation=PFMapFactored,
+                )
+                proj_grad = F.project(pfmap_grad)
+                proj_func = F.project(pfmap_func)
+                FinvG = F.F.solve(proj_grad, regul=regul / N).to_torch() / N
+                self_influence = torch.einsum(
+                    "onp, Onp->noO",
+                    proj_grad.to_torch(),
+                    FinvG,
+                )
+                FinvJ = F.F.solve(proj_func, regul=regul / N).to_torch() / N
+                leverage = torch.einsum("onp, Onp->noO", proj_func.to_torch(), FinvJ)
+                cross = torch.einsum("onp, Onp->noO", proj_grad.to_torch(), FinvJ)
+                self_influences.append(self_influence)
+                schur = torch.eye(leverage.shape[-1], device=args.device) - leverage
+                loo_effect = torch.linalg.solve(schur, cross.transpose(1, 2))
+                self_influences_loo.append(self_influence + cross @ loo_effect)
+                leverages.append(leverage)
+                leverages_loo.append(
+                    torch.linalg.solve(schur, leverage.transpose(1, 2))
+                )
+                det_schurs.append(torch.logdet(schur))
+                cooks.append(
+                    self_influence
+                    + cross @ loo_effect
+                    + loo_effect.transpose(1, 2) @ loo_effect
+                )
 
         # %%
         if self_influences[0].ndim == 3:
@@ -1307,3 +1363,5 @@ for i, (c, d) in enumerate([(256, 1)]):
             if "noisy_examples" not in run:
                 run.create_dataset("noisy_examples", data=noisy_examples.detach().cpu())
                 run.create_dataset("indices", data=eval_idx.detach().cpu())
+
+# %%
