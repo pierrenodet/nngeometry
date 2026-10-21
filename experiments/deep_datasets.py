@@ -55,6 +55,13 @@ def cifar10(root, train=True, transform=None):
     X = torch.stack([transform(img.convert("RGB")) for img in dataset["img"]])
     y = torch.tensor(dataset["label"])
 
+    if train:
+        # https://huggingface.co/datasets/uoft-cs/cifar10/discussions/8
+        idx = torch.concatenate(
+            [torch.arange(k, k + 10000) for k in (40000, 20000, 10000, 0, 30000)]
+        )
+        X, y = X[idx], y[idx]
+
     return TensorDataset(X, y)
 
 
@@ -464,7 +471,6 @@ DATASETS = {
                 weight_decay=1e-4,
                 momentum=0.9,
                 nesterov=True,
-                fused=True,
             ),
             partial(optim.lr_scheduler.MultiStepLR, milestones=[100, 150], gamma=0.1),
         ),

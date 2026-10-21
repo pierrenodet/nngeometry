@@ -82,6 +82,7 @@ if is_interactive():
 parser = argparse.ArgumentParser()
 add_default_arguments(parser, "mislabeled")
 parser.add_argument("--noise_ratio", type=float, default=0.25)
+parser.add_argument("--noise_corruption", choices=["random", "worse"], default="random")
 parser.add_argument("--rank", type=int, default=None)
 parser.add_argument("--eval_size", type=int, default=None)
 parser.add_argument("--train_size", type=int, default=None)
@@ -93,8 +94,9 @@ args.runs = 1
 args.seed = 1337
 args.strategy = "kfac"
 args.solver = "eigh"
+# args.noise_corruption = "worse"
 # args.device = "cuda"
-# args.repr = "F_logra"
+# args.repr = "F_i"
 # args.regul = 1e-4
 # args.regul_type = ""
 # args.eval_size = 1000
@@ -110,6 +112,8 @@ if isinstance(optimizer_fn, tuple):
 else:
     scheduler_fn = None
 
+if "cuda" in args.device:
+    optimizer_fn = partial(optimizer_fn, fused=True)
 
 if transform is not None:
     if hasattr(transform, "transforms"):
@@ -132,10 +136,6 @@ DataLoader = lambda dataset, **kwargs: InMemoryDataLoader(  # noqa: E731
     *dataset.tensors, device=args.device, **kwargs
 )
 
-
-test = DataLoader(test_set, batch_size=1024)
-
-
 if "cifar" in args.dataset:
     max_batch_size = 128
     augmentations = [random_flip(0.5), random_crop(4)]  # , random_erase(0.5, 3)]
@@ -144,29 +144,40 @@ else:
     max_batch_size = 128
     augmentations = []
 
+# %%
 
-# if args.dataset == "cifar-10":
-#     fname = "CIFAR-10_human.pt"
-#     if not os.path.exists(os.path.join(args.data_dir, fname)):
-#         r = requests.get(
-#             f"https://github.com/UCSC-REAL/cifar-10-100n/raw/refs/heads/main/data/{fname}"
-#         )
-#         open(os.path.join(args.data_dir, fname), "wb").write(r.content)
-#     noises = torch.load(os.path.join(args.data_dir, fname), weights_only=False)
+if args.dataset == "cifar-10" and args.noise_corruption != "random":
+    fname = "CIFAR-10_human.pt"
+    if not os.path.exists(os.path.join(args.data_dir, fname)):
+        r = requests.get(
+            f"https://github.com/UCSC-REAL/cifar-10-100n/raw/refs/heads/main/data/{fname}"
+        )
+        open(os.path.join(args.data_dir, fname), "wb").write(r.content)
+    noises = torch.load(os.path.join(args.data_dir, fname), weights_only=False)
+    print(noises)
+    noisy_train_set = deepcopy(train_set)
+    noisy_labels = torch.from_numpy(noises["worse_label"])[train_idx]
+    noisy_train_set.tensors[1][:] = noisy_labels
+else:
+    noisy_train_set = deepcopy(train_set)
+    targets = noisy_train_set.tensors[1]
+    noisy_probability = torch.rand(targets.shape[0])
+    noisy_examples = noisy_probability <= args.noise_ratio
+    noisy_labels = (
+        targets[noisy_examples]
+        + torch.randint(1, len(classes), (torch.sum(noisy_examples),))
+    ) % len(classes)
+    noisy_train_set.tensors[1][noisy_examples] = noisy_labels
+
+
+noisy_examples = noisy_train_set.tensors[1] != train_set.tensors[1]
+
+print(torch.mean(noisy_examples.to(dtype=float)))
 
 train = DataLoader(train_set, batch_size=128, shuffle=True)
-
-noisy_train_set = deepcopy(train_set)
-targets = noisy_train_set.tensors[1]
-noisy_probability = torch.rand(targets.shape[0])
-noisy_examples = noisy_probability <= args.noise_ratio
-noisy_labels = (
-    targets[noisy_examples]
-    + torch.randint(1, len(classes), (torch.sum(noisy_examples),))
-) % len(classes)
-noisy_train_set.tensors[1][noisy_examples] = noisy_labels
-
 noisy_train = DataLoader(noisy_train_set, batch_size=128, shuffle=True)
+
+test = DataLoader(test_set, batch_size=1024)
 
 # epochs = (
 #     [0]
