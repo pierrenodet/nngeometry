@@ -1,3 +1,4 @@
+from copy import deepcopy
 from functools import partial
 
 import pytest
@@ -51,6 +52,7 @@ linear_tasks = [
     partial(get_layernorm_3d_task, rms_norm=True, bias=False),
     get_embedding_task,
     partial(get_embedding_task, freeze=True),
+    partial(get_embedding_task, tie=True),
     get_linear_fc_task,
     get_linear_conv_task,
     get_batchnorm_fc_linear_task,
@@ -1225,13 +1227,75 @@ def test_example_passing():
 
 
 def test_shared_parameters():
-    # test that shared parameters (e.g. using twice the same layer)
-    # is detected and raises an error
-    model = nn.Sequential(*[nn.Linear(4, 4)] * 2)
+    model1 = nn.Sequential(*[nn.Linear(4, 4, bias=False)] * 2)
     d = torch.rand((5, 4))
 
-    with pytest.raises(NotImplementedError):
-        J = Jacobian(model, (d,), lambda x: model(x))
+    J1 = Jacobian(model1, (d,))
+    P1 = PMatDense(
+        LayerCollection.from_model(model1),
+        TorchHooksJacobianBackend(model1),
+        examples=(d,),
+    )
+    F1 = FMatDense(
+        LayerCollection.from_model(model1),
+        TorchHooksJacobianBackend(model1),
+        examples=(d,),
+    )
+
+    model2 = nn.Sequential(*[deepcopy(model1[0]), deepcopy(model1[1])])
+    J2 = Jacobian(model2, (d,))
+    J2_dense = 0
+    for layer_id, layer in J2.layer_collection.layers.items():
+        J2_dense += J2.to_torch_layer(layer_id)[0].reshape(*J1.size())
+
+    P2_dense = (
+        J2_dense.reshape(-1, J2_dense.size(-1)).t()
+        @ J2_dense.reshape(-1, J2_dense.size(-1))
+    ) / d.size(0)
+    F2_dense = torch.einsum("onp, ONp->onON", J2_dense, J2_dense)
+    torch.testing.assert_close(J1.to_torch(), J2_dense)
+    torch.testing.assert_close(P1.to_torch(), P2_dense)
+    torch.testing.assert_close(F1.to_torch(), F2_dense)
+
+
+def test_tied_weights():
+    layer1, layer2 = nn.Linear(4, 4, bias=False), nn.Linear(4, 4, bias=False)
+    layer2.weight = layer1.weight
+    model1 = nn.Sequential(*([layer2] * 2))
+    model2 = nn.Sequential(layer1, layer2)
+    d = torch.rand((5, 4))
+
+    J1 = Jacobian(model1, (d,))
+    P1 = PMatDense(
+        LayerCollection.from_model(model1),
+        TorchHooksJacobianBackend(model1),
+        examples=(d,),
+    )
+    F1 = FMatDense(
+        LayerCollection.from_model(model1),
+        TorchHooksJacobianBackend(model1),
+        examples=(d,),
+    )
+
+    J2 = Jacobian(model2, (d,))
+    J2_dense = 0
+    for layer_id, layer in J2.layer_collection.layers.items():
+        J2_dense += J2.to_torch_layer(layer_id)[0].reshape(*J1.size())
+
+    P2_dense = (
+        J2_dense.reshape(-1, J2_dense.size(-1)).t()
+        @ J2_dense.reshape(-1, J2_dense.size(-1))
+    ) / d.size(0)
+    F2_dense = torch.einsum("onp, ONp->onON", J2_dense, J2_dense)
+    F2 = FMatDense(
+        LayerCollection.from_model(model2),
+        TorchHooksJacobianBackend(model2),
+        examples=(d,),
+    )
+
+    torch.testing.assert_close(J1.to_torch(), J2_dense)
+    torch.testing.assert_close(P1.to_torch(), P2_dense)
+    torch.testing.assert_close(F1.to_torch(), F2_dense)
 
 
 def test_empty_lc_or_wrong_func():

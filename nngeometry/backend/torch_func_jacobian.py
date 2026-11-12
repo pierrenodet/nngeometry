@@ -36,7 +36,9 @@ class TorchFuncJacobianBackend(AbstractBackend):
         n_examples = len(loader.sampler)
 
         def function(params, inputs, targets=None):
-            predictions = torch.func.functional_call(self.model, params, (inputs,))
+            predictions = torch.func.functional_call(
+                self.model, params, (inputs,), tie_weights=False
+            )
             if targets is None:
                 return self.function(predictions)
             else:
@@ -94,7 +96,9 @@ class TorchFuncJacobianBackend(AbstractBackend):
         n_examples = len(loader.sampler)
 
         def function(params, inputs, targets):
-            predictions = torch.func.functional_call(self.model, params, (inputs,))
+            predictions = torch.func.functional_call(
+                self.model, params, (inputs,), tie_weights=False
+            )
             if targets is None:
                 return self.function(predictions)
             else:

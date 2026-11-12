@@ -197,10 +197,18 @@ class LinearJacobianFactory(JacobianFactory):
     @classmethod
     def quasidiag(cls, buffer_diag, buffer_cross, mod, layer, x, gy):
         w_numel = layer.weight.numel()
-        buffer_diag[:w_numel].add_(torch.mm(gy.t() ** 2, x**2).view(-1))
-        if layer.has_bias():
-            buffer_diag[w_numel:].add_((gy**2).sum(dim=0))
-            buffer_cross.add_(torch.mm(gy.t() ** 2, x))
+        if gy.ndim == 2:
+            buffer_diag[:w_numel].add_(torch.mm(gy.t() ** 2, x**2).view(-1))
+            if layer.has_bias():
+                buffer_diag[w_numel:].add_((gy**2).sum(dim=0))
+                buffer_cross.add_(torch.mm(gy.t() ** 2, x))
+        elif gy.ndim == 3:
+            gw = torch.bmm(gy.transpose(1, 2), x)
+            buffer_diag[:w_numel].add_((gw**2).sum(dim=0).view(-1))
+            if layer.has_bias():
+                gb = gy.sum(dim=1)
+                buffer_diag[w_numel:].add_((gb**2).sum(dim=0))
+                buffer_cross.add_((gb[:, :, None] * gw).sum(dim=0))
 
 
 class Conv2dJacobianFactory(JacobianFactory):

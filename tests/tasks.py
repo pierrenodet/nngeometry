@@ -193,13 +193,14 @@ class EmbeddingNet(nn.Module):
     def __init__(self):
         super(EmbeddingNet, self).__init__()
         self.embedding_layer = nn.Embedding(10, 3)
+        self.head_layer = nn.Linear(3, 10, bias=False)
 
     def forward(self, x):
         output = self.embedding_layer(x)
-        return output.sum(axis=1)
+        return self.head_layer(output).sum(axis=1)
 
 
-def get_embedding_task(freeze=False):
+def get_embedding_task(freeze=False, tie=False):
     train_set = TensorDataset(
         torch.randint(0, 5, size=(12, 4)), torch.randint(0, 3, size=(12,))
     )
@@ -210,6 +211,9 @@ def get_embedding_task(freeze=False):
 
     if freeze:
         net.embedding_layer.requires_grad_(False)
+
+    if tie:
+        net.head_layer.weight = net.embedding_layer.weight
 
     def output_fn(input, target):
         return net(input)

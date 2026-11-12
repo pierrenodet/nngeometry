@@ -3,6 +3,7 @@ from functools import partial
 
 import torch
 
+from nngeometry.layercollection import LinearLayer
 from nngeometry.object.vector import FVector, PVector
 
 from .._backend import AbstractBackend
@@ -69,7 +70,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
         layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
 
         self._handles += self._add_hooks(
-            self._hook_savex,
+            None,
             self._hook_compute_flat_grad,
             layerid_to_mod,
             layer_collection,
@@ -98,7 +99,6 @@ class TorchHooksJacobianBackend(AbstractBackend):
         self._buffer["start"] = 0
         self._buffer["i_output"] = 0
         for d in self._get_iter_loader(loader):
-            self._buffer["xs"] = dict()
             output, backward = forward(*d)
             output = output.sum(dim=0)
             n_output = output.size(-1)
@@ -128,7 +128,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
         layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
 
         self._handles += self._add_hooks(
-            self._hook_savex,
+            None,
             self._hook_compute_diag,
             layerid_to_mod,
             layer_collection,
@@ -145,7 +145,6 @@ class TorchHooksJacobianBackend(AbstractBackend):
         )
         self._buffer["start"] = 0
         for d in self._get_iter_loader(loader):
-            self._buffer["xs"] = dict()
             output, backward = forward(*d)
             output = output.sum(dim=0)
             n_output = output.size(-1)
@@ -167,7 +166,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
         layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
 
         self._handles += self._add_hooks(
-            self._hook_savex,
+            None,
             self._hook_compute_quasidiag,
             layerid_to_mod,
             layer_collection,
@@ -195,7 +194,6 @@ class TorchHooksJacobianBackend(AbstractBackend):
                 )
 
         for d in self._get_iter_loader(loader):
-            self._buffer["xs"] = dict()
             output, backward = forward(*d)
             output = output.sum(dim=0)
             n_output = output.size(-1)
@@ -218,7 +216,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
         layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
 
         self._handles += self._add_hooks(
-            self._hook_savex,
+            None,
             self._hook_compute_layer_blocks,
             layerid_to_mod,
             layer_collection,
@@ -238,7 +236,6 @@ class TorchHooksJacobianBackend(AbstractBackend):
             )
 
         for d in self._get_iter_loader(loader):
-            self._buffer["xs"] = dict()
             output, backward = forward(*d)
             output = output.sum(dim=0)
             n_output = output.size(-1)
@@ -264,7 +261,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
             raise NotImplementedError()
 
         self._handles += self._add_hooks(
-            self._hook_savex,
+            None,
             hook_gy,
             layerid_to_mod,
             layer_collection,
@@ -299,7 +296,6 @@ class TorchHooksJacobianBackend(AbstractBackend):
             )
 
         for d in self._get_iter_loader(loader):
-            self._buffer["xs"] = dict()
             output, backward = forward(*d)
             output = output.sum(dim=0)
             n_output = output.size(-1)
@@ -329,7 +325,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
         layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
 
         self._handles += self._add_hooks(
-            self._hook_savex,
+            None,
             self._hook_compute_flat_grad,
             layerid_to_mod,
             layer_collection,
@@ -351,7 +347,6 @@ class TorchHooksJacobianBackend(AbstractBackend):
 
         self._buffer["start"] = 0
         for d in self._get_iter_loader(loader):
-            self._buffer["xs"] = dict()
             output, backward = forward(*d)
             output = output.sum(dim=0)
             n_output = output.size(-1)
@@ -373,7 +368,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
         layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
 
         self._handles += self._add_hooks(
-            self._hook_savex_io,
+            None,
             self._hook_kxy,
             layerid_to_mod,
             layer_collection,
@@ -394,10 +389,8 @@ class TorchHooksJacobianBackend(AbstractBackend):
 
         self.delayed_for_n_output.append(_f)
 
-        self._buffer["gy_outer"] = dict()
         self._buffer["e_outer"] = 0
         for i_outer, d in enumerate(self._get_iter_loader(loader)):
-            self._buffer["x_outer"] = dict()
             # used in hooks to switch between store/compute
             self.outerloop_switch = True
             bs_outer = d[0].size(0)
@@ -408,6 +401,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
 
             for self._buffer["i_output_outer"] in range(n_output):
                 self.outerloop_switch = True
+                self._buffer["outer"] = dict()
                 backward_outer(
                     output_outer[self._buffer["i_output_outer"]],
                     retain_graph=True,
@@ -416,7 +410,6 @@ class TorchHooksJacobianBackend(AbstractBackend):
 
                 self._buffer["e_inner"] = 0
                 for i_inner, d in enumerate(loader):
-                    self._buffer["x_inner"] = dict()
                     if i_inner > i_outer:
                         break
                     bs_inner = d[0].size(0)
@@ -482,7 +475,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
         layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
 
         self._handles += self._add_hooks(
-            self._hook_savex,
+            None,
             self._hook_compute_kfe_diag,
             layerid_to_mod,
             layer_collection,
@@ -517,7 +510,6 @@ class TorchHooksJacobianBackend(AbstractBackend):
             )
 
         for d in self._get_iter_loader(loader):
-            self._buffer["xs"] = dict()
             output, backward = forward(*d)
             output = output.sum(dim=0)
             n_output = output.size(-1)
@@ -538,7 +530,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
         layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
 
         self._handles += self._add_hooks(
-            self._hook_savex,
+            None,
             self._hook_compute_Jv,
             layerid_to_mod,
             layer_collection,
@@ -567,7 +559,6 @@ class TorchHooksJacobianBackend(AbstractBackend):
         self._buffer["i_output"] = 0
         self._buffer["start"] = 0
         for d in self._get_iter_loader(loader):
-            self._buffer["xs"] = dict()
             output, backward = forward(*d)
             n_output = output.size(-1)
             pseudo_loss = 0
@@ -604,7 +595,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
         layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
 
         self._handles += self._add_hooks(
-            self._hook_savex,
+            None,
             self._hook_compute_Jv,
             layerid_to_mod,
             layer_collection,
@@ -629,7 +620,6 @@ class TorchHooksJacobianBackend(AbstractBackend):
         norm2 = 0
         self._buffer["compute_switch"] = True
         for d in self._get_iter_loader(loader):
-            self._buffer["xs"] = dict()
             output, backward = forward(*d)
             output = output.sum(dim=0)
             n_output = output.size(-1)
@@ -652,7 +642,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
         layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
 
         self._handles += self._add_hooks(
-            self._hook_savex,
+            None,
             self._hook_compute_trace,
             layerid_to_mod,
             layer_collection,
@@ -665,7 +655,6 @@ class TorchHooksJacobianBackend(AbstractBackend):
 
         self._buffer["trace"] = torch.tensor(0.0, device=device)
         for d in self._get_iter_loader(loader):
-            self._buffer["xs"] = dict()
             output, backward = forward(*d)
             output = output.sum(dim=0)
             n_output = output.size(-1)
@@ -683,7 +672,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
         layerid_to_mod = layer_collection.get_layerid_module_map(self.model)
 
         self._handles += self._add_hooks(
-            self._hook_savex,
+            None,
             self._hook_compute_Jv,
             layerid_to_mod,
             layer_collection,
@@ -707,7 +696,6 @@ class TorchHooksJacobianBackend(AbstractBackend):
         self._buffer["start"] = 0
         self._buffer["compute_switch"] = True
         for d in self._get_iter_loader(loader):
-            self._buffer["xs"] = dict()
             output, backward = forward(*d)
             output = output.sum(dim=0)
             n_output = output.size(-1)
@@ -725,10 +713,13 @@ class TorchHooksJacobianBackend(AbstractBackend):
         handles = []
 
         def _hook_x(mod, i, o, layer_id):
-            hook_x(mod, i)
             o.register_hook(
                 lambda g_o: hook_gy(
-                    mod, g_o, layer_id=layer_id, layer_collection=layer_collection
+                    mod,
+                    i[0].detach(),
+                    g_o,
+                    layer_id=layer_id,
+                    layer_collection=layer_collection,
                 )
             )
 
@@ -782,8 +773,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
         else:
             self._buffer["x_inner"][mod] = i[0]
 
-    def _hook_compute_flat_grad(self, mod, gy, layer_id, layer_collection):
-        x = self._buffer["xs"][mod]
+    def _hook_compute_flat_grad(self, mod, x, gy, layer_id, layer_collection):
         bs = x.size(0)
         layer = layer_collection[layer_id]
         start_p = layer_collection.p_pos[layer_id]
@@ -799,29 +789,27 @@ class TorchHooksJacobianBackend(AbstractBackend):
             gy,
         )
 
-    def _hook_compute_diag(self, mod, gy, layer_id, layer_collection):
-        x = self._buffer["xs"][mod]
+    def _hook_compute_diag(self, mod, x, gy, layer_id, layer_collection):
         layer = layer_collection[layer_id]
         start_p = layer_collection.p_pos[layer_id]
         FactoryMap[layer.__class__].diag(
             self._buffer["diag_m"][start_p : start_p + layer.numel()], mod, layer, x, gy
         )
 
-    def _hook_compute_quasidiag(self, mod, gy, layer_id, layer_collection):
-        x = self._buffer["xs"][mod]
+    def _hook_compute_quasidiag(self, mod, x, gy, layer_id, layer_collection):
         layer = layer_collection[layer_id]
         diag, cross = self._buffer["blocks"][layer_id]
         FactoryMap[layer.__class__].quasidiag(diag, cross, mod, layer, x, gy)
 
-    def _hook_compute_layer_blocks(self, mod, gy, layer_id, layer_collection):
-        x = self._buffer["xs"][mod]
+    def _hook_compute_layer_blocks(self, mod, x, gy, layer_id, layer_collection):
         layer = layer_collection[layer_id]
         block = self._buffer["blocks"][layer_id]
         FactoryMap[layer.__class__].layer_block(block, mod, layer, x, gy)
 
-    def _hook_compute_one_iter_kpsvd_blocks(self, mod, gy, layer_id, layer_collection):
+    def _hook_compute_one_iter_kpsvd_blocks(
+        self, mod, x, gy, layer_id, layer_collection
+    ):
         mod_class = mod.__class__.__name__
-        x = self._buffer["xs"][mod]
         layer = layer_collection[layer_id]
         if mod_class in ["Linear", "Conv2d", "Conv1d", "Embedding"]:
             FactoryMap[layer.__class__].one_iter_kpsvd_blocks(
@@ -835,9 +823,8 @@ class TorchHooksJacobianBackend(AbstractBackend):
         else:
             raise NotImplementedError
 
-    def _hook_compute_kfac_blocks(self, mod, gy, layer_id, layer_collection):
+    def _hook_compute_kfac_blocks(self, mod, x, gy, layer_id, layer_collection):
         mod_class = mod.__class__.__name__
-        x = self._buffer["xs"][mod]
         layer = layer_collection[layer_id]
         block = self._buffer["blocks"][layer_id]
         if mod_class in ["Linear", "Conv2d", "Conv1d", "Embedding"]:
@@ -848,10 +835,9 @@ class TorchHooksJacobianBackend(AbstractBackend):
         else:
             raise NotImplementedError
 
-    def _hook_compute_kfe_diag(self, mod, gy, layer_id, layer_collection):
+    def _hook_compute_kfe_diag(self, mod, x, gy, layer_id, layer_collection):
         mod_class = mod.__class__.__name__
         layer = layer_collection[layer_id]
-        x = self._buffer["xs"][mod]
         evecs_a, evecs_g = self._buffer["kfe"][layer_id]
         if mod_class in ["Linear", "Conv2d", "Conv1d", "Embedding"]:
             FactoryMap[layer.__class__].kfe_diag(
@@ -860,15 +846,13 @@ class TorchHooksJacobianBackend(AbstractBackend):
         else:
             raise NotImplementedError
 
-    def _hook_kxy(self, mod, gy, layer_id, layer_collection):
+    def _hook_kxy(self, mod, x, gy, layer_id, layer_collection):
         if self.outerloop_switch:
-            self._buffer["gy_outer"][mod] = gy
+            self._buffer["outer"][layer_id] = (x, gy)
         else:
             layer = layer_collection[layer_id]
-            gy_inner = gy
-            gy_outer = self._buffer["gy_outer"][mod]
-            x_outer = self._buffer["x_outer"][mod]
-            x_inner = self._buffer["x_inner"][mod]
+            x_outer, gy_outer = self._buffer["outer"][layer_id]
+            x_inner, gy_inner = x, gy
             bs_inner = x_inner.size(0)
             bs_outer = x_outer.size(0)
             FactoryMap[layer.__class__].kxy(
@@ -886,9 +870,8 @@ class TorchHooksJacobianBackend(AbstractBackend):
                 gy_outer,
             )
 
-    def _hook_compute_Jv(self, mod, gy, layer_id, layer_collection):
+    def _hook_compute_Jv(self, mod, x, gy, layer_id, layer_collection):
         if self._buffer["compute_switch"]:
-            x = self._buffer["xs"][mod]
             bs = x.size(0)
             layer = layer_collection.layers[layer_id]
             v_weight = self._buffer["v"][layer_id][0]
@@ -908,8 +891,7 @@ class TorchHooksJacobianBackend(AbstractBackend):
                 v_bias,
             )
 
-    def _hook_compute_trace(self, mod, gy, layer_id, layer_collection):
-        x = self._buffer["xs"][mod]
+    def _hook_compute_trace(self, mod, x, gy, layer_id, layer_collection):
         layer = layer_collection.layers[layer_id]
         FactoryMap[layer.__class__].trace(self._buffer["trace"], mod, layer, x, gy)
 

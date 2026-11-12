@@ -36,7 +36,9 @@ class TorchFuncHessianBackend(AbstractBackend):
         H = torch.zeros((n_parameters, n_parameters), device=device, dtype=dtype)
 
         def compute_loss(params, inputs, targets):
-            prediction = torch.func.functional_call(self.model, params, (inputs,))
+            prediction = torch.func.functional_call(
+                self.model, params, (inputs,), tie_weights=False
+            )
             return self.function(prediction, targets)
 
         params_dict = dict(layer_collection.named_parameters(layerid_to_mod))
@@ -115,7 +117,9 @@ class TorchFuncHessianBackend(AbstractBackend):
         loader = self._get_dataloader(examples)
 
         def compute_loss(params, inputs, targets):
-            prediction = torch.func.functional_call(self.model, params, (inputs,))
+            prediction = torch.func.functional_call(
+                self.model, params, (inputs,), tie_weights=False
+            )
             return self.function(prediction, targets)
 
         params_dict = dict(layer_collection.named_parameters(layerid_to_mod))
@@ -163,7 +167,9 @@ class TorchFuncHessianBackend(AbstractBackend):
         loader = self._get_dataloader(examples)
 
         def compute_loss(params, inputs, targets):
-            prediction = torch.func.functional_call(self.model, params, (inputs,))
+            prediction = torch.func.functional_call(
+                self.model, params, (inputs,), tie_weights=False
+            )
             return self.function(prediction, targets)
 
         so, sb, *_ = pfmap.size()
