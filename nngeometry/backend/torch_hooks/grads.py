@@ -616,8 +616,8 @@ class EmbeddingJacobianFactory(JacobianFactory):
         x_s = x.size()
         x_onehot = F.one_hot(x, num_classes=layer.num_embeddings).reshape(
             x_s[0] * x_s[1], -1
-        )
-        buffer.add_(torch.mm(x_onehot.t(), x_onehot).to(buffer.dtype))
+        ).to(buffer.dtype)
+        buffer.add_(torch.mm(x_onehot.t(), x_onehot))
 
     @classmethod
     def kfe_diag(cls, buffer, mod, layer, x, gy, evecs_a, evecs_g):
