@@ -1,6 +1,7 @@
 # /// script
 # dependencies = [
-#   "nngeometry"
+#   "nngeometry",
+#   "datasets",
 # ]
 # [tool.uv.sources]
 # nngeometry = { path = "..", editable = true }
@@ -14,12 +15,13 @@ import time
 from functools import partial
 
 import torch
+from datasets import load_dataset
 from torch import nn
-from torch.utils.data import Subset
-from torchvision import datasets, transforms
+from torch.utils.data import TensorDataset
+from torchvision import transforms
 from torchvision.models import resnet50
-from utils import InMemoryDataLoader, to_tensor_dataset
 
+from benchmark.utils import InMemoryDataLoader
 from nngeometry.backend import torch_hooks as nnj
 from nngeometry.layercollection import LayerCollection
 from nngeometry.metrics import FIM_MonteCarlo
@@ -50,14 +52,18 @@ if args.image_size == "imagenet":
     ] + transform
 transform = transforms.Compose(transform)
 
-datasets.CIFAR10.url = (
-    "https://zenodo.org/records/15602362/files/cifar-10-python.tar.gz?download=1"
+dataset = load_dataset("uoft-cs/cifar10", split="train")
+dataset = dataset.select(range(1000))
+dataset = dataset.map(
+    lambda example: {"input": transform(example["img"].convert("RGB"))},
+    remove_columns=["img"],
 )
-trainset = datasets.CIFAR10(
-    root="/tmp/data", train=True, download=True, transform=transform
+dataset = dataset.select_columns(["input", "label"]).with_format("torch")
+trainset = TensorDataset(*dataset[:].values())
+
+trainloader = InMemoryDataLoader(
+    trainset, batch_size=50, shuffle=False, device=args.device
 )
-trainset = to_tensor_dataset(Subset(trainset, range(1000)), device=args.device)
-trainloader = InMemoryDataLoader(trainset, batch_size=50, shuffle=False)
 
 # %%
 model = resnet50(num_classes=10, norm_layer=lambda c: nn.Identity())

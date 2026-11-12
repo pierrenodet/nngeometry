@@ -3,7 +3,6 @@ from torch.utils.data import (
     DataLoader,
     RandomSampler,
     SequentialSampler,
-    TensorDataset,
 )
 
 
@@ -60,19 +59,3 @@ class InMemoryDataLoader(DataLoader):
         if self.drop_last:
             return self.dataset_length // self.batch_size
         return (self.dataset_length + self.batch_size - 1) // self.batch_size
-
-
-def to_tensor_dataset(dataset, device=None):
-    inputs, targets = [], []
-    for i, t in dataset:
-        inputs.append(i)
-        targets.append(t)
-    inputs = torch.stack(inputs, dim=0)
-    if isinstance(targets[0], (int, float)) or targets[0].ndim == 0:
-        targets = torch.tensor(targets)
-    else:
-        targets = torch.stack(targets, dim=0)
-    if device is not None:
-        inputs = inputs.to(device=device)
-        targets = targets.to(device=device)
-    return TensorDataset(inputs, targets)
